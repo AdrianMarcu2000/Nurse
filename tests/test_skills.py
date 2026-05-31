@@ -311,3 +311,28 @@ def test_cardiac_cloud_uses_anthropic_with_mock(monkeypatch):
         cfg.set_overrides({"skills": {"registry": {"cardiac": {
             "location": "on_device", "provider": None}}}})
         cfg.get_config.cache_clear()
+
+
+# ── Late follow-up: continue_with adds new info, never re-answers ──────────────
+
+def test_continue_with_prompts_for_new_info_not_reanswer():
+    """continue_with builds a follow-up prompt that includes what was already said and the
+    new findings, and instructs not to repeat — it must NOT re-send the original question."""
+    from nurse.skills.front_voice import LLMFrontVoice
+    fake = _FakeLLM()
+    ctx = Context(user_text="my heart is racing", history=[])
+    findings = [SkillFinding(source="cardiac", summary="HR 130, consider escalation")]
+    out = "".join(LLMFrontVoice(fake).continue_with(ctx, "Let me check that.", findings))
+    assert out == "ok"
+    prompt = fake.seen_messages[-1]["content"]
+    assert "Let me check that." in prompt          # knows what it already said
+    assert "HR 130" in prompt                        # has the new finding
+    assert "Do NOT repeat" in prompt or "not repeat" in prompt.lower()
+
+
+def test_continue_with_no_findings_yields_nothing():
+    from nurse.skills.front_voice import LLMFrontVoice
+    fake = _FakeLLM()
+    out = "".join(LLMFrontVoice(fake).continue_with(Context(user_text="hi"), "said", []))
+    assert out == ""                                  # no follow-up when nothing new
+    assert fake.seen_messages is None                 # LLM not even called

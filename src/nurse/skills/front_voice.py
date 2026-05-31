@@ -32,6 +32,30 @@ class LLMFrontVoice(FrontVoice):
         )
         yield from self.llm.stream_response(messages)
 
+    def continue_with(self, context, already_said, new_findings):
+        """A brief spoken follow-up adding only the NEW info from late findings. Framed as
+        a continuation of what was already said, so it never re-answers the question."""
+        if not new_findings:
+            return
+        findings_text = "\n".join(f"- ({f.source}) {f.summary}" for f in new_findings)
+        instruction = (
+            "You just told the patient:\n"
+            f'"{already_said}"\n\n'
+            "A moment later, more detail came in:\n"
+            f"{findings_text}\n\n"
+            "Add a short, natural spoken follow-up (one or two sentences) that shares ONLY "
+            "what's genuinely new or important from that detail. Continue the conversation "
+            "as if you'd just remembered to mention it (e.g. \"Oh — and …\"). Do NOT repeat "
+            "what you already said. If the detail adds nothing new, say nothing."
+        )
+        messages = build_messages(
+            context.history,
+            instruction,
+            patient_summary=context.patient_summary,
+            rag_context=context.rag_context,
+        )
+        yield from self.llm.stream_response(messages)
+
     def _with_findings(self, context: Context) -> str:
         """Fold fresh skill findings into the RAG-context slot so the Front Voice can
         reference them ('I can see…'). Stale findings (older than the window) are dropped

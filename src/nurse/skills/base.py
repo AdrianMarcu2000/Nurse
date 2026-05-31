@@ -97,6 +97,12 @@ class FrontVoice(ABC):
 
     @abstractmethod
     def respond(self, context: Context) -> Iterator[str]:
-        """Stream the spoken reply as text tokens, weaving in any findings in `context`.
-        Can be re-invoked to *continue* once more findings land."""
+        """Stream the spoken reply as text tokens, weaving in any findings in `context`."""
         ...
+
+    def continue_with(self, context: Context, already_said: str,
+                      new_findings: list[SkillFinding]) -> Iterator[str]:
+        """Stream a brief *follow-up* after the quick reply, adding only the NEW info from
+        late-arriving findings — NOT a re-answer of the original question. Default: no
+        follow-up (yield nothing)."""
+        return iter(())
