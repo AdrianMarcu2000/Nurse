@@ -29,6 +29,13 @@ from nurse.memory.longterm import LongTermMemory
 from nurse.memory.session import SessionMemory
 from nurse.rag.retrieve import retrieve
 from nurse.safety.filter import check_and_escalate
+from nurse.speech.arbiter import (
+    PRIORITY_PROACTIVE,
+    PRIORITY_REACTIVE,
+    PRIORITY_SAFETY,
+    SpeechArbiter,
+    SpeechIntent,
+)
 from nurse.tts.kokoro_stream import synthesize_sentences, SAMPLE_RATE
 
 logger = logging.getLogger(__name__)
@@ -51,6 +58,9 @@ class NursePipeline:
         self._busy = threading.Lock()
         # Most recent time Aria and the patient interacted, for interval check-ins.
         self._last_interaction: datetime | None = None
+        # All speech goes through the arbiter (single TTS owner). Its speak_fn performs
+        # the actual synth+playback via _render_speech; callers submit SpeechIntents.
+        self.arbiter = SpeechArbiter(self._render_speech)
 
     def set_mic(self, mic) -> None:
         """Wire the mic so the pipeline can mute it while speaking."""
@@ -76,7 +86,7 @@ class NursePipeline:
 
         if not latest and not facts:
             # No history at all — nothing to personalize from beyond the name.
-            self._speak_text(fallback)
+            self._say(fallback, source="greeting")
             self._transcript_log.append(f"Aria: {fallback}")
             self._last_interaction = datetime.now()
             return
@@ -110,7 +120,7 @@ class NursePipeline:
             logger.warning("Greeting leaked a placeholder or was empty; using fallback. Got: %r", greeting)
             greeting = fallback
         logger.info("Greeting: %s", greeting)
-        self._speak_text(greeting)
+        self._say(greeting, source="greeting")
         self._transcript_log.append(f"Aria: {greeting}")
         self._last_interaction = datetime.now()
 
@@ -152,7 +162,8 @@ class NursePipeline:
             timeout = get_config()["proactive"]["engage_response_timeout_seconds"]
 
             # 1. Ask permission.
-            self._speak_text(get_config()["proactive"]["engage_prompt"])
+            self._say(get_config()["proactive"]["engage_prompt"],
+                      priority=PRIORITY_PROACTIVE, source="engage")
 
             # 2. Listen for one reply, bounded by the engage timeout. Silence (None)
             #    is a no-response, distinct from a spoken decline.
@@ -166,7 +177,7 @@ class NursePipeline:
             logger.info("Engage (%s) reply=%r → %s", engagement.kind, reply, verdict)
 
             if verdict != "yes":
-                self._speak_text(pro["declined"])
+                self._say(pro["declined"], priority=PRIORITY_PROACTIVE, source="engage")
                 self._last_interaction = datetime.now()
                 return "declined"
 
@@ -174,7 +185,7 @@ class NursePipeline:
             #    patient can respond and Aria can help / log / escalate as usual. The
             #    follow-up turn blocks normally — he's already engaged.
             message = pro[engagement.kind].format(detail=engagement.detail)
-            self._speak_text(message)
+            self._say(message, priority=PRIORITY_PROACTIVE, source="engage")
             self._transcript_log.append(f"Aria (proactive {engagement.kind}): {message}")
             self._last_interaction = datetime.now()
 
@@ -226,9 +237,12 @@ class NursePipeline:
                 "reason": f"Emergency keyword in: {user_text}",
                 "urgency": "immediate",
             })
-            # Deliver the canned escalation message immediately
+            # Deliver the canned escalation message immediately (top priority,
+            # non-interruptible — must finish alerting).
             escalation_msg = get_persona()["escalation_message"]
-            self._speak_text(escalation_msg)
+            self.arbiter.speak_now(SpeechIntent(
+                priority=PRIORITY_SAFETY, source="safety",
+                text_or_stream=escalation_msg, interruptible=False))
             self.session.add_user(user_text)
             self.session.add_assistant(escalation_msg)
             self._transcript_log.append(f"Aria: {escalation_msg}")
@@ -310,7 +324,10 @@ class NursePipeline:
 
     def _speak_text(self, text: str) -> float:
         """Synthesize text and play it through the speaker. Mutes mic during playback.
-        Returns the wall-clock ms spent synthesizing + playing."""
+        Returns the wall-clock ms spent synthesizing + playing.
+
+        Low-level renderer. In Step 8 the per-chunk loop will consult a stop_event for
+        barge-in; today it plays each sentence to completion."""
         t0 = time.perf_counter()
         if self._mic:
             self._mic.mute()
@@ -322,6 +339,33 @@ class NursePipeline:
             if self._mic:
                 self._mic.unmute()
         return (time.perf_counter() - t0) * 1000
+
+    def _render_speech(self, text_or_stream, stop_event) -> None:
+        """The SpeechArbiter's speak_fn: render a text string (or a token stream) to the
+        speaker. stop_event is honored per-chunk in Step 8; ignored for now."""
+        if isinstance(text_or_stream, str):
+            self._speak_text(text_or_stream)
+        else:
+            # A token stream: accumulate to sentences and speak each (same as the
+            # reactive path). Used once responders stream through the arbiter.
+            buf = ""
+            import re
+            sentence_end = re.compile(r"[.!?]\s")
+            for token in text_or_stream:
+                buf += token
+                if sentence_end.search(buf):
+                    parts = sentence_end.split(buf)
+                    if len(parts) > 1:
+                        to_speak = buf[: buf.rfind(parts[-1])].strip()
+                        buf = parts[-1]
+                        if to_speak:
+                            self._speak_text(to_speak)
+            if buf.strip():
+                self._speak_text(buf.strip())
+
+    def _say(self, text: str, priority: int = PRIORITY_REACTIVE, source: str = "aria") -> None:
+        """Speak a discrete utterance through the arbiter (the single TTS owner)."""
+        self.arbiter.speak_now(SpeechIntent(priority=priority, source=source, text_or_stream=text))
 
     def end_session(self) -> None:
         """Update long-term memory with a dated summary of this session."""
