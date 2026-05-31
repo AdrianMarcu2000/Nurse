@@ -225,3 +225,37 @@ class VitalsThreshold:
             return float(str(value).split()[0])
         except (ValueError, IndexError):
             return None
+
+
+# ── Finding surfacing (async results from cloud/late skills) ────────────────────
+
+class FindingTrigger:
+    """Surfaces an important async result — a late sensing finding or a cloud
+    specialist's answer — so the Front Voice proactively brings it up.
+
+    Producers (the orchestrator's async callbacks, cloud skills) push SkillFindings via
+    `queue_finding`. On the next tick the highest-priority queued finding fires an
+    engagement; the Front Voice speaks it ("By the way, …"). Quiet hours are respected
+    unless the finding is flagged urgent (e.g. a vitals/safety-grade observation).
+    """
+    overrides_quiet_hours = False
+
+    def __init__(self) -> None:
+        self._queue: list[dict] = []  # {summary, urgent}
+
+    def queue_finding(self, summary: str, urgent: bool = False) -> None:
+        if summary and summary.strip():
+            self._queue.append({"summary": summary.strip(), "urgent": urgent})
+
+    def due(self, now: datetime) -> Engagement | None:
+        if not self._queue:
+            return None
+        # Urgent first, else FIFO.
+        idx = next((i for i, f in enumerate(self._queue) if f["urgent"]), 0)
+        item = self._queue.pop(idx)
+        return Engagement(
+            kind="finding",
+            detail=item["summary"],
+            overrides_quiet_hours=item["urgent"],
+            priority=90 if item["urgent"] else 15,
+        )

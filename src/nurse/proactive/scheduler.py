@@ -14,6 +14,7 @@ from nurse.config import get_config
 from nurse.proactive.quiet_hours import QuietHours
 from nurse.proactive.triggers import (
     DueReminders,
+    FindingTrigger,
     IntervalCheckIn,
     MemoryFollowUp,
     VitalsThreshold,
@@ -34,8 +35,12 @@ class ProactiveScheduler:
         # An engagement that got no response, to retry once its not-before time passes.
         self._pending_retry = None          # the Engagement
         self._retry_not_before: datetime | None = None
+        # Surfaces async results (cloud/late skill findings); producers call
+        # scheduler.findings.queue_finding(...). Exposed so the pipeline/skills can reach it.
+        self.findings = FindingTrigger()
         self.triggers = [
             VitalsThreshold(pipeline.patient_id),
+            self.findings,
             DueReminders(pipeline.patient_id),
             IntervalCheckIn(pipeline.last_interaction),
             MemoryFollowUp(pipeline.long_term, pipeline.last_interaction),

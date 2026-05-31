@@ -51,5 +51,6 @@ proactive:
   check_in: "I just wanted to check in — how are you feeling?"
   follow_up: "Earlier you mentioned {detail}. How is that now?"
   vitals_alert: "I noticed your {detail}. I want to make sure you're alright."
+  finding: "By the way, {detail}"
   # Spoken when Octavian declines the engage prompt.
   declined: "No problem, I'll check back later."

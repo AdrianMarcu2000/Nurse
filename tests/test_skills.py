@@ -249,3 +249,26 @@ def test_recency_window_drops_stale_finding():
     fresh = ctx.fresh_findings(max_age_s=120, now=now)
     summaries = [f.summary for f in fresh]
     assert summaries == ["fresh"]                 # stale (10 min) dropped, only fresh kept
+
+
+# ── Step 7: cloud skill (async, opt-in, mocked HTTP) ───────────────────────────
+
+def test_cloud_skill_off_by_default(monkeypatch):
+    from nurse.skills.sensing.external import CloudSkill
+    # No config / no endpoint → unavailable (offline-first default).
+    assert CloudSkill("vision", endpoint=None).available() is False
+
+
+def test_cloud_skill_returns_finding_with_mocked_client():
+    from nurse.skills.sensing.external import CloudSkill
+    skill = CloudSkill("vision", endpoint="https://example/api")
+    skill.enabled = True
+    # Mock the HTTP client — no real network.
+    class _FakeClient:
+        def post(self, payload):
+            return {"summary": "cloud saw a cluttered floor"}
+    skill._client = _FakeClient()
+    assert skill.available()
+    finding = skill.run(Context(user_text="what do you see"))
+    assert finding.source == "vision" and "cluttered floor" in finding.summary
+    assert finding.keep is True

@@ -229,3 +229,26 @@ def test_retry_waits_out_quiet_hours_for_nonurgent(profiles):
     sched.tick(datetime(2026, 5, 31, 22, 20))
     assert pipe.engaged == ["check_in"]
     assert sched._pending_retry is not None
+
+
+# ── FindingTrigger (async result surfacing) ────────────────────────────────────
+
+def test_finding_trigger_queues_and_fires(profiles):
+    from nurse.proactive.triggers import FindingTrigger
+    ft = FindingTrigger()
+    assert ft.due(datetime(2026, 5, 31, 14, 0)) is None      # empty → nothing
+    ft.queue_finding("the video review flagged a slip risk")
+    eng = ft.due(datetime(2026, 5, 31, 14, 0))
+    assert eng is not None and eng.kind == "finding"
+    assert "slip risk" in eng.detail
+    assert ft.due(datetime(2026, 5, 31, 14, 1)) is None      # consumed
+
+
+def test_finding_trigger_urgent_first_and_overrides_quiet(profiles):
+    from nurse.proactive.triggers import FindingTrigger
+    ft = FindingTrigger()
+    ft.queue_finding("routine note", urgent=False)
+    ft.queue_finding("possible fall detected", urgent=True)
+    eng = ft.due(datetime(2026, 5, 31, 3, 0))
+    assert "fall" in eng.detail                  # urgent jumps the queue
+    assert eng.overrides_quiet_hours is True
