@@ -1,0 +1,83 @@
+# ── Audio ─────────────────────────────────────────────────────────────────────
+audio:
+  sample_rate: 16000
+  channels: 1
+  # Set to null to use system default; or run `python -m sounddevice` to list
+  input_device: null
+  output_device: null
+  # VAD silence timeout before declaring end-of-turn (seconds).
+  # This is dead latency on every turn — lower = snappier, too low = cuts off
+  # slow talkers. 0.2 keeps time-to-first-audio down without clipping speech.
+  vad_silence_duration: 0.2
+  # Volume threshold (0.0–1.0) below which audio is considered silence
+  vad_threshold: 0.5
+  # Chunk size in ms fed to VAD
+  vad_chunk_ms: 32
+
+# ── ASR (Whisper) ──────────────────────────────────────────────────────────────
+asr:
+  model_size: "tiny.en"           # tiny.en | base.en | small.en | medium.en
+  device: "auto"                  # auto | cpu | cuda | mps
+  compute_type: "int8"            # int8 | float16 | float32
+  language: "en"
+  beam_size: 1                    # 1 = fastest, higher = more accurate
+  vad_filter: true
+
+# ── LLM ───────────────────────────────────────────────────────────────────────
+llm:
+  # MLX backend (Mac M-series) — HuggingFace model ID, downloaded automatically
+  mlx_model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+
+  # llama.cpp backend (Jetson / fallback) — local GGUF file
+  # Populated by scripts/download_models.sh
+  model_path: "models/qwen2.5-3b-instruct-q4_k_m.gguf"
+  n_ctx: 4096
+  n_gpu_layers: -1                # -1 = all layers on Metal/CUDA
+  n_threads: 6
+  temperature: 0.4
+  max_tokens: 120                 # per response turn — keeps answers concise and fast
+  # How many past turns to keep in context (beyond system prompt + RAG)
+  context_turns: 8
+  # Streaming: emit tokens as they arrive
+  stream: true
+
+# ── TTS (Kokoro) ──────────────────────────────────────────────────────────────
+tts:
+  voice: "af_heart"               # af_heart | af_bella | am_adam | bf_emma
+  speed: 1.1
+  # Split LLM output into sentences for lower first-audio latency
+  sentence_split: true
+
+# ── RAG ───────────────────────────────────────────────────────────────────────
+rag:
+  db_path: "data/lancedb"
+  table_name: "protocols"
+  embedding_model: "BAAI/bge-small-en-v1.5"
+  top_k: 3
+  score_threshold: 0.35           # discard irrelevant chunks below this score
+
+# ── Memory ────────────────────────────────────────────────────────────────────
+memory:
+  patient_profiles_dir: "data/patient_profiles"
+  # Max tokens for long-term summary injected into prompt
+  summary_max_tokens: 300
+
+# ── Safety ────────────────────────────────────────────────────────────────────
+safety:
+  # Any match forces an escalate_to_human tool call
+  escalation_keywords:
+    - "chest pain"
+    - "can't breathe"
+    - "can not breathe"
+    - "difficulty breathing"
+    - "heart attack"
+    - "stroke"
+    - "unconscious"
+    - "not responding"
+    - "overdose"
+    - "suicidal"
+    - "want to die"
+    - "kill myself"
+    - "severe bleeding"
+    - "allergic reaction"
+    - "anaphylaxis"

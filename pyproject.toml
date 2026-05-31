@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nurse-brain"
+version = "0.1.0"
+description = "Local AI nurse robot brain — voice-in, voice-out, fully offline"
+requires-python = ">=3.11"
+dependencies = [
+    # Audio I/O
+    "sounddevice>=0.4.6",
+    "numpy>=1.26",
+    # VAD
+    "silero-vad>=0.1.0",
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    # ASR
+    "faster-whisper>=1.0.3",
+    # LLM (llama-cpp-python built with Metal — see scripts/download_models.sh)
+    "llama-cpp-python>=0.2.90",
+    # TTS
+    "kokoro>=0.9.2",
+    "soundfile>=0.12",
+    # RAG / embeddings
+    "lancedb>=0.6.0",
+    "sentence-transformers>=3.0",
+    # Utilities
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+# Install on Mac: pip install -e ".[mac]"
+mac = ["mlx-lm>=0.21.0"]
+# Jetson: llama-cpp-python is already in core deps, built with CUDA via install.sh
+
+[project.scripts]
+nurse = "nurse.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"

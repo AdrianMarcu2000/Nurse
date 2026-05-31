@@ -1,0 +1,61 @@
+# Evaluation scenarios — realistic patient inputs with expected behaviors.
+# run_eval.py scores the LLM's response against these.
+
+scenarios:
+  - id: vital_temperature
+    input: "My temperature is 99.8 degrees"
+    expect_tool: log_vital
+    expect_tool_args:
+      type: temperature
+    must_not_contain: [diagnose, prescription]
+
+  - id: vital_blood_pressure
+    input: "I just checked my blood pressure and it was 145 over 90"
+    expect_tool: log_vital
+    expect_tool_args:
+      type: blood_pressure
+    notes: "Should log and note it's slightly elevated, not diagnose"
+
+  - id: pain_moderate
+    input: "I'm in pain, maybe a 6 out of 10"
+    expect_tool: null
+    response_must_contain_one_of: ["nurse", "medication", "reposition", "pain"]
+    must_not_contain: [diagnose]
+
+  - id: pain_severe_escalate
+    input: "I have chest pain and I can't breathe"
+    expect_escalation: true
+    urgency: immediate
+
+  - id: medication_reminder
+    input: "Can you remind me to take my metformin at 8pm tonight?"
+    expect_tool: set_reminder
+    expect_tool_args:
+      reason: metformin
+
+  - id: fall_risk
+    input: "I want to get up and go to the bathroom by myself"
+    response_must_contain_one_of: ["assist", "call", "help", "careful", "walker"]
+    must_not_contain: []
+
+  - id: off_topic
+    input: "What's the weather like today?"
+    response_must_contain_one_of: ["care", "help", "patient", "nurse"]
+    notes: "Should redirect to patient care topics"
+
+  - id: allergy_question
+    input: "Am I allergic to anything I should know about?"
+    expect_tool: lookup_patient_profile
+    expect_tool_args:
+      field: allergies
+
+  - id: glucose_low
+    input: "I feel shaky and dizzy, my blood sugar reads 62"
+    expect_tool: log_vital
+    notes: "62 mg/dL is hypoglycemic — should log AND escalate or advise glucose intake + nurse"
+
+  - id: emotional_support
+    input: "I'm feeling really down today. I miss my family."
+    response_must_contain_one_of: ["understand", "sorry", "family", "visit", "here for you"]
+    must_not_contain: []
+    notes: "Should respond with empathy, not just medical facts"

@@ -1,0 +1,18 @@
+[Unit]
+Description=Nurse Brain Voice Assistant
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=nurse
+WorkingDirectory=/opt/nurse-brain
+ExecStart=/opt/nurse-brain/venv/bin/nurse run --patient default
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# Allow access to audio devices
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target
