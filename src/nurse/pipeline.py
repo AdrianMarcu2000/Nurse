@@ -317,16 +317,13 @@ class NursePipeline:
             self._record_partial(user_text, full_response, timing["spoken"])
             return
 
-        # A specialist that finished AFTER the opener enriches the turn: the Front Voice
-        # continues in its own words with the new finding (still one voice). Skipped when
-        # no specialist was pending.
-        late = self.orchestrator.collect_pending(context, timeout=5.0)
-        if late and not self._turn_stop.is_set():
-            cont, cont_timing = self._stream_and_speak(
-                self.orchestrator.registry.front_voice.respond(context),
-                stop_event=self._turn_stop)
-            if cont.strip():
-                full_response = f"{full_response} {cont}".strip()
+        # Collect any specialist findings that returned AFTER the opener. We do NOT
+        # re-run the Front Voice here — calling respond() again on the same input
+        # re-answers the question and duplicates the reply (observed bug). Late findings
+        # are added to the context and promoted to memory below, so they inform the NEXT
+        # turn / the session summary rather than gluing a redundant re-answer onto this
+        # one. (A spoken "by the way…" follow-up belongs on the proactive path.)
+        self.orchestrator.collect_pending(context, timeout=2.0)
         t_end = time.perf_counter()
 
         # The Front Voice's full spoken reply, on one line, so it sits beside any
