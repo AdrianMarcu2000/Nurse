@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import threading
 import time
+from datetime import datetime
 
 import numpy as np
 
@@ -43,6 +45,12 @@ class NursePipeline:
         self._transcript_log: list[str] = []
         self._mic = None  # set via set_mic() after MicrophoneStream is created
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        # Aria can only do one thing at a time — a reactive turn OR a proactive
+        # engagement. Both acquire this lock so she never talks over herself or hears
+        # her own voice. Proactive attempts use a non-blocking acquire and defer if busy.
+        self._busy = threading.Lock()
+        # Most recent time Aria and the patient interacted, for interval check-ins.
+        self._last_interaction: datetime | None = None
 
     def set_mic(self, mic) -> None:
         """Wire the mic so the pipeline can mute it while speaking."""
@@ -58,18 +66,24 @@ class NursePipeline:
         yields nothing.
         """
         persona = get_persona()
+        name = get_config()["patient"]["name"]
         latest = self.long_term.latest()
         facts = self.long_term.patient_facts()
 
+        # Always address the patient by name. Static fallback is used on a first-ever
+        # session (no history) or if generation yields nothing.
+        fallback = f"Hello, {name}! I'm Aria, your nurse assistant. How are you feeling today?"
+
         if not latest and not facts:
-            # No history at all — nothing to personalize from.
-            self._speak_text(persona["greeting"])
-            self._transcript_log.append(f"Aria: {persona['greeting']}")
+            # No history at all — nothing to personalize from beyond the name.
+            self._speak_text(fallback)
+            self._transcript_log.append(f"Aria: {fallback}")
+            self._last_interaction = datetime.now()
             return
 
         ctx_parts = []
         if facts:
-            ctx_parts.append("Patient: " + ", ".join(f"{k}={v}" for k, v in facts.items()))
+            ctx_parts.append("Known facts: " + ", ".join(f"{k}={v}" for k, v in facts.items()))
         if latest:
             ctx_parts.append(
                 f"Last session ({latest.get('date', 'recently')}): "
@@ -77,25 +91,109 @@ class NursePipeline:
             )
         context = "\n".join(ctx_parts)
 
+        # Put the actual name inline in the instruction (never as a labeled "name:" slot)
+        # and show the literal opening — small models otherwise tend to parrot the slot
+        # label and say "Hello, patient name!" instead of resolving it.
         messages = [
             {"role": "system", "content": persona["system_prompt"]},
             {"role": "user", "content": (
-                "Greet the patient to open this session. One or two warm, spoken "
-                "sentences. Greet them by their preferred name if known, and refer "
-                "naturally to ONE relevant thing from the last session, then ask how "
-                "they are. Do not give medical advice or invent anything.\n\n"
-                f"{context}"
+                f'Write a greeting that begins exactly with "Hello, {name}!" then, in '
+                "one or two warm spoken sentences, refers naturally to ONE relevant "
+                "thing from the last session and asks how they are. Use the literal "
+                f"name {name} — never the words \"patient name\". Do not give medical "
+                "advice or invent anything.\n\n"
+                f"Context about {name}:\n{context}"
             )},
         ]
         greeting = "".join(self.llm.stream_response(messages)).strip()
-        if not greeting:
-            greeting = persona["greeting"]
+        if not greeting or self._leaked_placeholder(greeting):
+            logger.warning("Greeting leaked a placeholder or was empty; using fallback. Got: %r", greeting)
+            greeting = fallback
         logger.info("Greeting: %s", greeting)
         self._speak_text(greeting)
         self._transcript_log.append(f"Aria: {greeting}")
+        self._last_interaction = datetime.now()
+
+    @staticmethod
+    def _leaked_placeholder(text: str) -> bool:
+        """True if the model left an unresolved name slot, e.g. '[Patient Name]',
+        '{name}', '<name>', or the literal phrase 'patient name'. We never want to
+        speak any of these aloud."""
+        import re
+        lowered = text.lower()
+        if "patient name" in lowered or "preferred name" in lowered:
+            return True
+        # Any bracketed/braced placeholder token.
+        return bool(re.search(r"[\[{<][^\]}>]*\b(name|patient)\b[^\]}>]*[\]}>]", lowered))
+
+    def last_interaction(self) -> datetime | None:
+        """When Aria and the patient last interacted — used by interval check-ins."""
+        return self._last_interaction
+
+    def engage(self, engagement) -> str:
+        """Proactively raise something with the patient, ask-to-engage style.
+
+        Returns one of:
+          "delivered"   — patient agreed and the engagement ran
+          "declined"    — patient said no / not now
+          "no_response" — no reply within the engage timeout (scheduler should retry)
+          "busy"        — Aria was mid reactive turn; deferred to a later tick
+
+        Acquires the busy-lock non-blocking so a reactive turn always wins.
+        """
+        from nurse.proactive.engage import classify_engage_reply
+
+        if not self._busy.acquire(blocking=False):
+            logger.debug("Engage skipped — Aria is busy")
+            return "busy"
+        try:
+            persona = get_persona()
+            pro = persona["proactive"]
+            timeout = get_config()["proactive"]["engage_response_timeout_seconds"]
+
+            # 1. Ask permission.
+            self._speak_text(get_config()["proactive"]["engage_prompt"])
+
+            # 2. Listen for one reply, bounded by the engage timeout. Silence (None)
+            #    is a no-response, distinct from a spoken decline.
+            reply_audio = self._mic.listen_once(timeout=timeout) if self._mic else None
+            if reply_audio is None:
+                logger.info("Engage (%s) — no response within %ss", engagement.kind, timeout)
+                return "no_response"
+
+            reply = transcribe(reply_audio)
+            verdict = classify_engage_reply(reply)
+            logger.info("Engage (%s) reply=%r → %s", engagement.kind, reply, verdict)
+
+            if verdict != "yes":
+                self._speak_text(pro["declined"])
+                self._last_interaction = datetime.now()
+                return "declined"
+
+            # 3. Deliver the proactive message, then run a normal listening turn so the
+            #    patient can respond and Aria can help / log / escalate as usual. The
+            #    follow-up turn blocks normally — he's already engaged.
+            message = pro[engagement.kind].format(detail=engagement.detail)
+            self._speak_text(message)
+            self._transcript_log.append(f"Aria (proactive {engagement.kind}): {message}")
+            self._last_interaction = datetime.now()
+
+            turn_audio = self._mic.listen_once() if self._mic else None
+            if turn_audio is not None:
+                # Reuse the full reactive pipeline (already holding the lock).
+                self._process_audio_locked(turn_audio)
+            return "delivered"
+        finally:
+            self._busy.release()
 
     def process_audio(self, audio: np.ndarray) -> None:
         """Process one user utterance end-to-end."""
+        # A reactive turn takes priority; block until any in-flight engagement frees
+        # the device, so we never run two conversations at once.
+        with self._busy:
+            self._process_audio_locked(audio)
+
+    def _process_audio_locked(self, audio: np.ndarray) -> None:
         t_start = time.perf_counter()
 
         # 1. ASR
@@ -104,6 +202,7 @@ class NursePipeline:
             return
 
         t_asr = time.perf_counter()
+        self._last_interaction = datetime.now()
         self._transcript_log.append(f"Patient: {user_text}")
 
         # 2. Fire RAG + long-term memory load in parallel while safety check runs

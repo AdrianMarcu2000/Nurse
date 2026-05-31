@@ -32,8 +32,13 @@ class MicrophoneStream:
         self.vad_threshold: float = cfg["vad_threshold"]
         self.chunk_samples: int = int(self.sample_rate * cfg["vad_chunk_ms"] / 1000)
         self._audio_q: queue.Queue[np.ndarray] = queue.Queue()
+        # Completed utterances land here from the VAD thread. Both the async iterator
+        # (reactive loop) and listen_once() (proactive engagement) read from it, so
+        # there is a single source of truth for "the user said something".
+        self._utterance_q: queue.Queue[np.ndarray] = queue.Queue()
         # When set, the VAD processing thread discards all audio and resets state.
         self._muted = threading.Event()
+        self._vad_started = False
 
     def mute(self) -> None:
         """Stop accepting audio — called while the robot is speaking."""
@@ -60,17 +65,18 @@ class MicrophoneStream:
         (get_speech_ts, *_) = utils
         return model, get_speech_ts
 
-    async def __aiter__(self) -> AsyncIterator[np.ndarray]:
-        loop = asyncio.get_running_loop()
-        vad_model, _ = await loop.run_in_executor(None, self._load_vad)
+    def _start_vad(self) -> None:
+        """Open the input stream and start the VAD thread that fills _utterance_q.
 
+        Idempotent — safe to call from both the async loop and listen_once().
+        """
+        if self._vad_started:
+            return
+        self._vad_started = True
+
+        vad_model, _ = self._load_vad()
         import torch
 
-        # Ring buffer for rolling chunk processing
-        buffer: list[np.ndarray] = []
-        speech_buffer: list[np.ndarray] = []
-        in_speech = False
-        silence_chunks = 0
         silence_threshold_chunks = int(
             self.vad_silence_duration * self.sample_rate / self.chunk_samples
         )
@@ -87,10 +93,10 @@ class MicrophoneStream:
             callback=callback,
         )
 
-        result_q: asyncio.Queue[np.ndarray] = asyncio.Queue()
-
         def process():
-            nonlocal in_speech, silence_chunks, speech_buffer
+            speech_buffer: list[np.ndarray] = []
+            in_speech = False
+            silence_chunks = 0
             with stream:
                 while True:
                     chunk = self._audio_q.get()
@@ -117,18 +123,33 @@ class MicrophoneStream:
                         speech_buffer.append(mono)
                         silence_chunks += 1
                         if silence_chunks >= silence_threshold_chunks:
-                            utterance = np.concatenate(speech_buffer)
-                            loop.call_soon_threadsafe(result_q.put_nowait, utterance)
+                            self._utterance_q.put(np.concatenate(speech_buffer))
                             speech_buffer = []
                             in_speech = False
                             silence_chunks = 0
 
-        thread = threading.Thread(target=process, daemon=True)
-        thread.start()
+        self._thread = threading.Thread(target=process, daemon=True)
+        self._thread.start()
 
+    def listen_once(self, timeout: float | None = None) -> np.ndarray | None:
+        """Block until the next complete utterance, or None if `timeout` elapses.
+
+        Used by proactive engagements to capture a single reply. Starts the VAD if it
+        is not already running.
+        """
+        self._start_vad()
+        try:
+            return self._utterance_q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    async def __aiter__(self) -> AsyncIterator[np.ndarray]:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._start_vad)
         try:
             while True:
-                utterance = await result_q.get()
+                # Pull from the shared utterance queue without blocking the event loop.
+                utterance = await loop.run_in_executor(None, self._utterance_q.get)
                 yield utterance
         finally:
             self._audio_q.put(None)

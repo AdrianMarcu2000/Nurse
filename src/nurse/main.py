@@ -66,13 +66,15 @@ def run(
     patient: str = typer.Option("default", "--patient", "-p", help="Patient ID to load"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     no_rag: bool = typer.Option(False, "--no-rag", help="Disable RAG retrieval"),
+    no_proactive: bool = typer.Option(False, "--no-proactive", help="Disable proactive engagement"),
 ) -> None:
     """Start the Nurse Brain voice assistant."""
     log_path = _setup_logging(verbose)
 
     console.print(Panel.fit(
         "[bold cyan]Nurse Brain[/bold cyan]\n"
-        f"Patient: [green]{patient}[/green]  |  RAG: {'off' if no_rag else 'on'}\n"
+        f"Patient: [green]{patient}[/green]  |  RAG: {'off' if no_rag else 'on'}"
+        f"  |  Proactive: {'off' if no_proactive else 'on'}\n"
         f"[dim]Log: {log_path}[/dim]\n"
         "[dim]Ctrl+C to end session[/dim]",
         border_style="cyan",
@@ -82,6 +84,7 @@ def run(
     from nurse.pipeline import NursePipeline
     from nurse.audio.input import MicrophoneStream
     from nurse.rag.index import build_index
+    from nurse.proactive.scheduler import ProactiveScheduler
 
     if not no_rag:
         try:
@@ -92,6 +95,7 @@ def run(
     pipeline = NursePipeline(patient_id=patient)
 
     async def _main():
+        loop = asyncio.get_running_loop()
         mic = MicrophoneStream()
         pipeline.set_mic(mic)
         # Prime the LLM (load weights + pre-fill the cached prompt prefix) before
@@ -99,12 +103,25 @@ def run(
         pipeline.llm.warmup()
         pipeline.greet()
         console.print("[dim]Listening…[/dim]")
+
+        # Proactive scheduler runs concurrently. The pipeline's busy-lock keeps it
+        # mutually exclusive with reactive turns; engagements run in the executor so
+        # the event loop (and the scheduler's sleep) is never blocked.
+        scheduler_task = None
+        if not no_proactive:
+            scheduler = ProactiveScheduler(pipeline)
+            scheduler_task = asyncio.create_task(scheduler.run())
+
         try:
             async for audio in mic:
-                pipeline.process_audio(audio)
+                # Run the blocking turn off the event loop so the scheduler keeps ticking.
+                await loop.run_in_executor(None, pipeline.process_audio, audio)
                 console.print("[dim]Listening…[/dim]")
         except asyncio.CancelledError:
             pass
+        finally:
+            if scheduler_task:
+                scheduler_task.cancel()
 
     loop = asyncio.new_event_loop()
 

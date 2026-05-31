@@ -34,3 +34,13 @@ greeting: "Hello, I'm Aria, your nurse assistant. How are you feeling today?"
 
 # Spoken when escalating to human
 escalation_message: "I'm alerting the nursing team right away. Please stay calm — someone will be with you very soon."
+
+# Proactive (Aria initiates). {reason}/{detail} are filled in at runtime.
+proactive:
+  # Spoken after Octavian agrees to engage, to open the proactive topic.
+  reminder: "It's time for your {detail}."
+  check_in: "I just wanted to check in — how are you feeling?"
+  follow_up: "Earlier you mentioned {detail}. How is that now?"
+  vitals_alert: "I noticed your {detail}. I want to make sure you're alright."
+  # Spoken when Octavian declines the engage prompt.
+  declined: "No problem, I'll check back later."

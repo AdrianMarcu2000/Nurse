@@ -7,8 +7,9 @@ audio:
   output_device: null
   # VAD silence timeout before declaring end-of-turn (seconds).
   # This is dead latency on every turn — lower = snappier, too low = cuts off
-  # slow talkers. 0.2 keeps time-to-first-audio down without clipping speech.
-  vad_silence_duration: 0.2
+  # slow talkers. Raised to 0.8 so Octavian can pause mid-sentence (common when
+  # recovering / elderly) without Aria jumping in and cutting him off.
+  vad_silence_duration: 0.8
   # Volume threshold (0.0–1.0) below which audio is considered silence
   vad_threshold: 0.5
   # Chunk size in ms fed to VAD
@@ -56,6 +57,12 @@ rag:
   top_k: 3
   score_threshold: 0.35           # discard irrelevant chunks below this score
 
+# ── Patient ───────────────────────────────────────────────────────────────────
+patient:
+  # The person this assistant serves. Used to address them by name in greetings and
+  # proactive prompts. Override per-deployment in config/local.yaml.
+  name: "Octavian"
+
 # ── Memory ────────────────────────────────────────────────────────────────────
 memory:
   patient_profiles_dir: "data/patient_profiles"
@@ -67,8 +74,14 @@ safety:
   # Any match forces an escalate_to_human tool call
   escalation_keywords:
     - "chest pain"
+    - "chest hurts"
+    - "chest hurting"
+    - "pain in my chest"
     - "can't breathe"
+    - "cannot breathe"
     - "can not breathe"
+    - "hard to breathe"
+    - "trouble breathing"
     - "difficulty breathing"
     - "heart attack"
     - "stroke"
@@ -81,3 +94,37 @@ safety:
     - "severe bleeding"
     - "allergic reaction"
     - "anaphylaxis"
+
+# ── Proactive (always-on, Aria initiates) ──────────────────────────────────────
+proactive:
+  enabled: true
+  # How often the scheduler wakes to check triggers (seconds).
+  tick_seconds: 45
+  # No proactive speech inside this wrap-around window (local time). Medication
+  # reminders and vitals alerts override it; check-ins and follow-ups do not.
+  quiet_hours:
+    start: "22:00"
+    end: "07:00"
+  # Interval check-in: fire if this long has passed since the last interaction.
+  check_in_interval_minutes: 120
+  # Memory follow-up: at most this many per day.
+  follow_up_max_per_day: 1
+  # Ask-to-engage gate.
+  engage_prompt: "Octavian, is now a good time to talk?"
+  # How long to wait for a reply to the engage prompt before treating it as no
+  # response (seconds). On no response the engagement is re-armed, not discarded.
+  engage_response_timeout_seconds: 30
+  # If there is no response to the engage prompt, retry the same engagement after
+  # this many minutes.
+  retry_after_minutes: 30
+  # Words that count as yes / no when Octavian answers the engage prompt.
+  engage_yes: ["yes", "yeah", "yep", "sure", "okay", "ok", "go ahead", "fine", "please do"]
+  engage_no: ["no", "not now", "later", "stop", "busy", "leave me", "go away", "not really"]
+  # Vitals threshold trigger reads data/patient_profiles/<id>_vitals_feed.jsonl
+  # (an external process / sensor appends {"type","value","timestamp"} lines).
+  # A reading outside [min, max] fires an immediate engagement (overrides quiet hours).
+  vitals_thresholds:
+    heart_rate:        {min: 45,  max: 120}
+    oxygen_saturation: {min: 92,  max: 100}
+    blood_glucose:     {min: 70,  max: 250}
+    temperature:       {min: 96.0, max: 100.4}
