@@ -324,6 +324,10 @@ class NursePipeline:
                 full_response = f"{full_response} {cont}".strip()
         t_end = time.perf_counter()
 
+        # The Front Voice's full spoken reply, on one line, so it sits beside any
+        # specialist finding ("CardiacSkill finding: …") for easy comparison in the log.
+        logger.info("Front Voice reply: %s", full_response)
+
         # Break the turn into stages so the bottleneck is unambiguous. LLM and TTS
         # interleave (each sentence is spoken as it completes), so these are the
         # cumulative wall-clock spent generating vs synthesizing+playing, plus the
