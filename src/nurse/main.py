@@ -38,6 +38,22 @@ def _apply_model_override(model: str | None) -> str | None:
     set_overrides({"llm": {key: model_id}})
     return model_id
 
+
+def _start_keypress_interrupt(pipeline) -> None:
+    """Start a daemon thread: each time the user presses Enter, request a barge-in.
+    A reliable interrupt that needs no echo cancellation (works on the Mac today)."""
+    import threading
+
+    def _listen() -> None:
+        while True:
+            try:
+                sys.stdin.readline()
+            except Exception:
+                return
+            pipeline.request_barge_in()
+
+    threading.Thread(target=_listen, daemon=True, name="keypress-interrupt").start()
+
 # Libraries whose DEBUG output is pure noise (HTTP wire logs, model fetch chatter).
 # Pinned to WARNING on every handler so even the file log stays readable.
 _NOISY_LIBS = (
@@ -93,6 +109,8 @@ def run(
     no_proactive: bool = typer.Option(False, "--no-proactive", help="Disable proactive engagement"),
     model: str = typer.Option(None, "--model", "-m",
                               help="Front Voice model: 1.5b | 3b | 7b (or a raw model id)."),
+    no_interrupt: bool = typer.Option(False, "--no-interrupt",
+                                      help="Disable press-Enter-to-interrupt (barge-in) while Aria speaks."),
 ) -> None:
     """Start the Nurse Brain voice assistant."""
     effective_model = _apply_model_override(model)
@@ -129,11 +147,17 @@ def run(
         # Barge-in: let the patient talk over Aria (active only if barge_in.enabled and an
         # AEC backend is present; otherwise a harmless no-op — mic stays muted as before).
         mic.set_barge_in_callback(pipeline.request_barge_in)
+        # Press-Enter barge-in: a reliable interrupt that works without AEC (voice
+        # barge-in needs echo cancellation, deferred to on-device hardware). Pressing
+        # Enter while Aria is speaking stops her and lets you talk.
+        if not no_interrupt:
+            _start_keypress_interrupt(pipeline)
         # Prime the LLM (load weights + pre-fill the cached prompt prefix) before
         # greeting, so the patient's first utterance doesn't eat the cold-start.
         pipeline.llm.warmup()
         pipeline.greet()
-        console.print("[dim]Listening…[/dim]")
+        console.print("[dim]Listening… (press Enter to interrupt Aria)[/dim]"
+                      if not no_interrupt else "[dim]Listening…[/dim]")
 
         # Proactive scheduler runs concurrently. The pipeline's busy-lock keeps it
         # mutually exclusive with reactive turns; engagements run in the executor so

@@ -112,6 +112,7 @@ def test_stream_and_speak_interrupts_and_reports_spoken():
     from nurse.pipeline import NursePipeline
 
     obj = types.SimpleNamespace()
+    obj._speaking = threading.Event()         # _stream_and_speak gates barge-in on this
     spoken_segments = []
     stop = threading.Event()
 
@@ -171,3 +172,24 @@ def test_barge_in_disabled_by_default_is_safe_noop():
     assert mic._barge_in_enabled is False
     assert mic._aec is None
     assert mic._barge_in_active() is False
+
+
+def test_request_barge_in_gated_on_speaking():
+    """request_barge_in is a no-op unless Aria is actually speaking, so a stray keypress
+    between turns can't pre-arm the stop flag and clip the next reply."""
+    import types, threading
+    from nurse.pipeline import NursePipeline
+
+    obj = types.SimpleNamespace()
+    obj._speaking = threading.Event()
+    obj._turn_stop = threading.Event()
+    obj.arbiter = types.SimpleNamespace(stop=lambda: None)
+
+    # Not speaking → no-op.
+    NursePipeline.request_barge_in(obj)
+    assert not obj._turn_stop.is_set()
+
+    # Speaking → arms the stop.
+    obj._speaking.set()
+    NursePipeline.request_barge_in(obj)
+    assert obj._turn_stop.is_set()

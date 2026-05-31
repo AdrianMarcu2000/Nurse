@@ -64,12 +64,20 @@ class NursePipeline:
         # (later steps) dispatch enrichment skills. The Front Voice is the only speaker.
         self.orchestrator = self._build_orchestrator()
         # Set to interrupt the in-progress reactive utterance (barge-in). Cleared at the
-        # start of each turn; raised by request_barge_in() (button now; AEC/VAD in Step 9).
+        # start of each turn; raised by request_barge_in() (keypress now; AEC/VAD later).
         self._turn_stop = threading.Event()
+        # True only while Aria is actively speaking a turn — gates barge-in so a stray
+        # keypress between turns is a no-op.
+        self._speaking = threading.Event()
 
     def request_barge_in(self) -> None:
         """Signal that the patient wants to interrupt the current utterance. Stops the
-        reactive stream and the arbiter's current (interruptible) intent."""
+        reactive stream and the arbiter's current (interruptible) intent.
+
+        No-op unless Aria is actually speaking, so a stray keypress between turns can't
+        pre-arm the stop flag and clip the next reply."""
+        if not self._speaking.is_set():
+            return
         self._turn_stop.set()
         self.arbiter.stop()
 
@@ -372,39 +380,48 @@ class NursePipeline:
         def speak(text: str) -> None:
             if timing["first_audio"] is None:
                 timing["first_audio"] = time.perf_counter()
+            # Aria is now audibly speaking → barge-in is meaningful from here.
+            if stop_event is not None:
+                self._speaking.set()
             timing["tts_ms"] += self._speak_text(text, stop_event=stop_event)
             timing["spoken"] = (timing["spoken"] + " " + text).strip()
 
-        t_tok = time.perf_counter()
-        for token in token_stream:
-            if stopped():
-                timing["interrupted"] = True
-                break
-            timing["gen_ms"] += (time.perf_counter() - t_tok) * 1000
-            sentence_buffer += token
-            full_response += token
-
-            # Check if we have at least one complete sentence
-            if sentence_end.search(sentence_buffer) or len(sentence_buffer) > 200:
-                # Find the last sentence boundary to keep partial tail
-                parts = sentence_end.split(sentence_buffer)
-                if len(parts) > 1:
-                    # Everything except the last partial fragment
-                    to_speak = sentence_end.sub(
-                        lambda m: m.group(0),
-                        sentence_buffer[:sentence_buffer.rfind(parts[-1])]
-                    ).strip()
-                    sentence_buffer = parts[-1]
-
-                    if to_speak:
-                        speak(to_speak)
+        def drive() -> None:
+            nonlocal sentence_buffer, full_response
             t_tok = time.perf_counter()
+            for token in token_stream:
+                if stopped():
+                    timing["interrupted"] = True
+                    return
+                timing["gen_ms"] += (time.perf_counter() - t_tok) * 1000
+                sentence_buffer += token
+                full_response += token
 
-        # Speak any remaining buffer (unless interrupted)
-        if sentence_buffer.strip() and not stopped():
-            speak(sentence_buffer.strip())
-        elif stopped():
-            timing["interrupted"] = True
+                # Check if we have at least one complete sentence
+                if sentence_end.search(sentence_buffer) or len(sentence_buffer) > 200:
+                    # Find the last sentence boundary to keep partial tail
+                    parts = sentence_end.split(sentence_buffer)
+                    if len(parts) > 1:
+                        # Everything except the last partial fragment
+                        to_speak = sentence_end.sub(
+                            lambda m: m.group(0),
+                            sentence_buffer[:sentence_buffer.rfind(parts[-1])]
+                        ).strip()
+                        sentence_buffer = parts[-1]
+                        if to_speak:
+                            speak(to_speak)
+                t_tok = time.perf_counter()
+
+            # Speak any remaining buffer (unless interrupted)
+            if sentence_buffer.strip() and not stopped():
+                speak(sentence_buffer.strip())
+            elif stopped():
+                timing["interrupted"] = True
+
+        try:
+            drive()
+        finally:
+            self._speaking.clear()
 
         return full_response.strip(), timing
 
