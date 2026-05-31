@@ -119,3 +119,14 @@ def test_front_voice_weaves_findings_into_context():
     "".join(LLMFrontVoice(fake).respond(ctx))
     system = fake.seen_messages[0]["content"]
     assert "patient on the floor" in system   # finding reached the prompt
+
+
+# ── Step 4: companion register + clinical hard-rules both present ──────────────
+
+def test_persona_allows_companion_and_keeps_clinical_rules():
+    from nurse.llm.prompt import build_system_prompt
+    sp = build_system_prompt().lower()
+    assert "companion" in sp                     # may chat about non-clinical topics
+    assert "not a doctor" in sp                  # clinical hard-rule intact
+    assert "escalate" in sp                      # escalation rule intact
+    assert "never discuss topics unrelated" not in sp   # blanket ban removed
