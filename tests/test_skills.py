@@ -272,3 +272,42 @@ def test_cloud_skill_returns_finding_with_mocked_client():
     finding = skill.run(Context(user_text="what do you see"))
     assert finding.source == "vision" and "cluttered floor" in finding.summary
     assert finding.keep is True
+
+
+# ── Cloud (Anthropic) specialist ────────────────────────────────────────────────
+
+def test_anthropic_client_key_from_env_only(monkeypatch):
+    """No key in env → complete() returns '' (graceful), never raises, never reads
+    anything but the env var."""
+    from nurse.skills.anthropic_client import AnthropicClient, api_key_present
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert api_key_present() is False
+    assert AnthropicClient("sonnet").complete("sys", "user") == ""
+
+
+def test_anthropic_alias_resolution():
+    from nurse.skills.anthropic_client import resolve_model
+    assert resolve_model("sonnet").startswith("claude-sonnet")
+    assert resolve_model("haiku").startswith("claude-haiku")
+    assert resolve_model("claude-custom-id") == "claude-custom-id"
+
+
+def test_cardiac_cloud_uses_anthropic_with_mock(monkeypatch):
+    """Cloud cardiac calls Anthropic (mocked) and returns a finding — no real network."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    import nurse.config as cfg
+    cfg.set_overrides({"skills": {"registry": {"cardiac": {
+        "enabled": True, "location": "cloud", "provider": "anthropic", "model": "sonnet"}}}})
+    try:
+        from nurse.skills.cardiac import CardiacSkill
+        import nurse.skills.anthropic_client as ac
+        monkeypatch.setattr(ac.AnthropicClient, "complete",
+                            lambda self, system, user: "Possible tachycardia; monitor and escalate if it persists.")
+        skill = CardiacSkill()
+        assert skill._is_cloud() and skill.available()
+        finding = skill.run(Context(user_text="my heart is racing"))
+        assert finding.source == "cardiac" and "tachycardia" in finding.summary
+    finally:
+        cfg.set_overrides({"skills": {"registry": {"cardiac": {
+            "location": "on_device", "provider": None}}}})
+        cfg.get_config.cache_clear()

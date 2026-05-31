@@ -39,6 +39,21 @@ def _apply_model_override(model: str | None) -> str | None:
     return model_id
 
 
+def _apply_specialist_override(specialist: str | None) -> str | None:
+    """Route the cardiac specialist to a cloud Claude model (haiku|sonnet|opus or a raw
+    id). The API key comes from ANTHROPIC_API_KEY in the env — never a flag or config.
+    Returns the resolved Claude model id, or None if no override."""
+    if not specialist:
+        return None
+    from nurse.config import set_overrides
+    from nurse.skills.anthropic_client import resolve_model
+    model = resolve_model(specialist)
+    set_overrides({"skills": {"registry": {"cardiac": {
+        "enabled": True, "location": "cloud", "provider": "anthropic", "model": model,
+    }}}})
+    return model
+
+
 def _start_keypress_interrupt(pipeline) -> None:
     """Start a daemon thread: each time the user presses Enter, request a barge-in.
     A reliable interrupt that needs no echo cancellation (works on the Mac today)."""
@@ -109,18 +124,23 @@ def run(
     no_proactive: bool = typer.Option(False, "--no-proactive", help="Disable proactive engagement"),
     model: str = typer.Option(None, "--model", "-m",
                               help="Front Voice model: 1.5b | 3b | 7b (or a raw model id)."),
+    specialist: str = typer.Option(None, "--specialist", "-s",
+                                   help="Run the cardiac specialist on cloud Claude: "
+                                        "haiku | sonnet | opus (needs ANTHROPIC_API_KEY env var)."),
     no_interrupt: bool = typer.Option(False, "--no-interrupt",
                                       help="Disable press-Enter-to-interrupt (barge-in) while Aria speaks."),
 ) -> None:
     """Start the Nurse Brain voice assistant."""
     effective_model = _apply_model_override(model)
+    effective_specialist = _apply_specialist_override(specialist)
     log_path = _setup_logging(verbose)
 
     console.print(Panel.fit(
         "[bold cyan]Nurse Brain[/bold cyan]\n"
         f"Patient: [green]{patient}[/green]  |  RAG: {'off' if no_rag else 'on'}"
         f"  |  Proactive: {'off' if no_proactive else 'on'}\n"
-        f"[dim]Model: {effective_model or 'config default'}[/dim]\n"
+        f"[dim]Model: {effective_model or 'config default'}"
+        f"{f'  |  Cloud specialist: {effective_specialist}' if effective_specialist else ''}[/dim]\n"
         f"[dim]Log: {log_path}[/dim]\n"
         "[dim]Ctrl+C to end session[/dim]",
         border_style="cyan",
