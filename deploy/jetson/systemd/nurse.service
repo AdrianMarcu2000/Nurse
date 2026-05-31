@@ -6,6 +6,11 @@ After=network.target sound.target
 Type=simple
 User=nurse
 WorkingDirectory=/opt/nurse-brain
+# Pin the Orin to max performance before launch (run as root via '+').
+# nvpmodel -m 0 = MAXN power mode; jetson_clocks locks clocks to max.
+# These are the single biggest latency lever on the Jetson and are otherwise absent.
+ExecStartPre=+/usr/sbin/nvpmodel -m 0
+ExecStartPre=+/usr/bin/jetson_clocks
 ExecStart=/opt/nurse-brain/venv/bin/nurse run --patient default
 Restart=on-failure
 RestartSec=5

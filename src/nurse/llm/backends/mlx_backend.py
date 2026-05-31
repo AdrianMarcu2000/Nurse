@@ -23,23 +23,27 @@ _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _JSON_CALL_RE = re.compile(r'\{"name":\s*"(\w+)",\s*"arguments":\s*(\{.*?\})\}', re.DOTALL)
 
 
-@lru_cache(maxsize=1)
-def _load_model():
+def _default_model_id() -> str:
+    return get_config()["llm"].get("mlx_model", "mlx-community/Qwen2.5-1.5B-Instruct-4bit")
+
+
+@lru_cache(maxsize=None)
+def _load_model(model_id: str):
+    """Load (model, tokenizer) for a given model id. Cached per id so several models
+    (Front Voice + specialists) can stay resident at once."""
     from mlx_lm import load
 
-    cfg = get_config()["llm"]
-    model_id = cfg.get("mlx_model", "mlx-community/Qwen2.5-1.5B-Instruct-4bit")
     logger.info("Loading LLM (MLX) — %s …", model_id)
     return load(model_id)  # returns (model, tokenizer)
 
 
-@lru_cache(maxsize=1)
-def _primed_prefix():
+@lru_cache(maxsize=None)
+def _primed_prefix(model_id: str):
     """
     Pre-fill a KV cache with the static prompt prefix (persona system prompt +
     tool schemas) that is identical on every turn. This is the bulk of the
     ~900-token prompt; prefilling it once collapses per-turn prefill from
-    ~1000ms to ~150ms. Returns (prefix_token_ids, master_cache).
+    ~1000ms to ~150ms. Returns (prefix_token_ids, master_cache). Cached per model id.
 
     The master is never mutated during generation — each turn deep-copies it
     (and trims the copy to the longest matching prefix) so generation state
@@ -48,7 +52,7 @@ def _primed_prefix():
     import mlx.core as mx
     from mlx_lm.models.cache import make_prompt_cache
 
-    model, tokenizer = _load_model()
+    model, tokenizer = _load_model(model_id)
     # Render only the static part: persona system prompt (no per-turn summary /
     # RAG) + tool schemas, with no generation prompt appended.
     prefix_text = tokenizer.apply_chat_template(
@@ -129,17 +133,18 @@ def _strip_tool_tags(text: str) -> str:
 
 
 class MLXBackend(LLMBackend):
-    def __init__(self, dispatcher: ToolDispatcher) -> None:
+    def __init__(self, dispatcher: ToolDispatcher, model_id: str | None = None) -> None:
         self.dispatcher = dispatcher
         cfg = get_config()["llm"]
+        self.model_id = model_id or _default_model_id()
         self.max_tokens: int = cfg["max_tokens"]
         self.temperature: float = cfg["temperature"]
 
     def warmup(self) -> None:
         """Load the model and prime the prefix KV cache so the first turn does
         not pay the ~3.6s cold-start cost on the patient's first utterance."""
-        _load_model()
-        _primed_prefix()
+        _load_model(self.model_id)
+        _primed_prefix(self.model_id)
 
     def stream_response(
         self, messages: list[dict[str, Any]]
@@ -149,8 +154,8 @@ class MLXBackend(LLMBackend):
         from mlx_lm.models.cache import trim_prompt_cache
         from mlx_lm.sample_utils import make_sampler
 
-        model, tokenizer = _load_model()
-        prefix_ids, master = _primed_prefix()
+        model, tokenizer = _load_model(self.model_id)
+        prefix_ids, master = _primed_prefix(self.model_id)
         sampler = make_sampler(temp=self.temperature)
         working_messages = list(messages)
 

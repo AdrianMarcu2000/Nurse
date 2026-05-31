@@ -15,12 +15,19 @@ from nurse.llm.tools import TOOLS, ToolDispatcher
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=1)
-def _load_model():
+def _default_model_id() -> str:
+    """For llama.cpp the 'model id' is the GGUF path (relative to project root)."""
+    return get_config()["llm"]["model_path"]
+
+
+@lru_cache(maxsize=None)
+def _load_model(model_id: str):
+    """Load a llama.cpp model by GGUF path. Cached per id so several models
+    (Front Voice + specialists) can stay resident at once."""
     from llama_cpp import Llama
 
     cfg = get_config()["llm"]
-    model_path = resolve(cfg["model_path"])
+    model_path = resolve(model_id)
     if not model_path.exists():
         raise FileNotFoundError(
             f"LLM model not found at {model_path}. Run scripts/download_models.sh first."
@@ -36,16 +43,30 @@ def _load_model():
 
 
 class LlamaBackend(LLMBackend):
-    def __init__(self, dispatcher: ToolDispatcher) -> None:
+    def __init__(self, dispatcher: ToolDispatcher, model_id: str | None = None) -> None:
         self.dispatcher = dispatcher
         cfg = get_config()["llm"]
+        self.model_id = model_id or _default_model_id()
         self.temperature: float = cfg["temperature"]
         self.max_tokens: int = cfg["max_tokens"]
+
+    def warmup(self) -> None:
+        """Load weights and run a 1-token generation so the patient's first turn does
+        not pay the full model-load + prefill cost (the base class's no-op left the
+        first turn cold on the Jetson)."""
+        llm = _load_model(self.model_id)
+        t0 = time.perf_counter()
+        llm.create_chat_completion(
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1,
+            temperature=0.0,
+        )
+        logger.info("llama.cpp warmup: %.0fms", (time.perf_counter() - t0) * 1000)
 
     def stream_response(
         self, messages: list[dict[str, Any]]
     ) -> Generator[str, None, None]:
-        llm = _load_model()
+        llm = _load_model(self.model_id)
         working_messages = list(messages)
 
         for _round in range(3):

@@ -17,23 +17,27 @@ from nurse.llm.tools import ToolDispatcher
 logger = logging.getLogger(__name__)
 
 
-def _build_backend(dispatcher: ToolDispatcher) -> LLMBackend:
+def _build_backend(dispatcher: ToolDispatcher, model_id: str | None = None) -> LLMBackend:
     try:
         import mlx.core  # noqa: F401 — present only on Apple Silicon
         from nurse.llm.backends.mlx_backend import MLXBackend
         logger.info("LLM backend: MLX (Apple Silicon)")
-        return MLXBackend(dispatcher)
+        return MLXBackend(dispatcher, model_id=model_id)
     except ImportError:
         from nurse.llm.backends.llama_backend import LlamaBackend
         logger.info("LLM backend: llama.cpp")
-        return LlamaBackend(dispatcher)
+        return LlamaBackend(dispatcher, model_id=model_id)
 
 
 class LLMClient:
-    """Thin wrapper so the rest of the codebase never imports a backend directly."""
+    """Thin wrapper so the rest of the codebase never imports a backend directly.
 
-    def __init__(self, dispatcher: ToolDispatcher) -> None:
-        self._backend = _build_backend(dispatcher)
+    `model_id` selects which model this client runs (the platform's Front Voice and each
+    skill construct their own client with their own model id). Omit it for the configured
+    default — preserving today's single-model behavior."""
+
+    def __init__(self, dispatcher: ToolDispatcher, model_id: str | None = None) -> None:
+        self._backend = _build_backend(dispatcher, model_id=model_id)
 
     def warmup(self) -> None:
         """Pre-load weights and prime prompt caches before the first turn."""
