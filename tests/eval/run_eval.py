@@ -46,9 +46,18 @@ def score_scenario(scenario: dict, llm_response: str, tool_calls_made: list[str]
     return True, "ok"
 
 
-def run_eval() -> None:
+def run_eval(model: str | None = None) -> None:
     scenarios_path = Path(__file__).parent / "scenarios.yaml"
     scenarios = yaml.safe_load(scenarios_path.read_text())["scenarios"]
+
+    # Honor --model so the eval runs (and reports) the model you intend — a silently
+    # ignored flag previously made scores ambiguous. Reuses nurse run's alias mapping.
+    from nurse.main import _apply_model_override
+    _apply_model_override(model)
+
+    from nurse.config import get_config
+    effective_model = get_config()["llm"]["mlx_model"]
+    console.print(f"[bold]Eval model:[/bold] {effective_model}")
 
     from nurse.pipeline import NursePipeline
 
@@ -115,4 +124,12 @@ def run_eval() -> None:
 
 
 if __name__ == "__main__":
-    run_eval()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run the offline nurse eval.")
+    parser.add_argument("--model", "-m", default=None,
+                        help="Front Voice model: 1.5b | 3b | 7b (or a raw model id). "
+                             "Defaults to the configured model.")
+    # parse_args() errors loudly on unknown flags — no more silently-ignored --model.
+    args = parser.parse_args()
+    run_eval(model=args.model)
