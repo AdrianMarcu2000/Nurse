@@ -235,6 +235,12 @@ class NursePipeline:
         with self._busy:
             self._process_audio_locked(audio)
 
+    def process_text(self, user_text: str) -> None:
+        """Run one turn from text (no ASR). Used by the offline eval to drive the real
+        pipeline — safety gate, orchestrator, Front Voice, tool dispatch — without a mic."""
+        with self._busy:
+            self._process_text_locked(user_text, t_start=time.perf_counter(), t_asr=time.perf_counter())
+
     def _process_audio_locked(self, audio: np.ndarray) -> None:
         t_start = time.perf_counter()
 
@@ -242,8 +248,10 @@ class NursePipeline:
         user_text = transcribe(audio)
         if not user_text:
             return
-
         t_asr = time.perf_counter()
+        self._process_text_locked(user_text, t_start=t_start, t_asr=t_asr)
+
+    def _process_text_locked(self, user_text: str, t_start: float, t_asr: float) -> None:
         self._last_interaction = datetime.now()
         self._transcript_log.append(f"Patient: {user_text}")
 

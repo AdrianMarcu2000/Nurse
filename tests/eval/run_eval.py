@@ -50,14 +50,32 @@ def run_eval() -> None:
     scenarios_path = Path(__file__).parent / "scenarios.yaml"
     scenarios = yaml.safe_load(scenarios_path.read_text())["scenarios"]
 
-    from nurse.llm.tools import ToolDispatcher, TOOLS
-    from nurse.llm.prompt import build_messages
-    from nurse.llm.client import LLMClient
-    from nurse.memory.longterm import LongTermMemory
-    from nurse.rag.retrieve import retrieve
+    from nurse.pipeline import NursePipeline
 
-    dispatcher = ToolDispatcher("eval_patient")
-    llm = LLMClient(dispatcher)
+    # Drive the REAL pipeline (safety gate → orchestrator → Front Voice → tool dispatch)
+    # via process_text, with the speaker stubbed so nothing is played and we can capture
+    # what Aria would say. This tests what actually ships, not the bare model.
+    pipeline = NursePipeline(patient_id="eval_patient")
+
+    spoken_chunks: list[str] = []
+    pipeline.speaker.play = lambda *a, **k: None          # don't actually play audio
+    # Capture spoken text at the synth boundary (covers greeting, reply, escalation).
+    import nurse.pipeline as _pl
+    _orig_synth = _pl.synthesize_sentences
+    def _capture_synth(text):
+        spoken_chunks.append(text)
+        # Yield a single dummy (audio, sentence) so the play loop runs without real TTS.
+        import numpy as _np
+        yield (_np.zeros(1, dtype=_np.float32), text)
+    _pl.synthesize_sentences = _capture_synth
+
+    # Track tool dispatches (incl. escalation, which the pipeline dispatches itself).
+    calls_made: list[str] = []
+    _orig_dispatch = pipeline.dispatcher.dispatch
+    def _tracking_dispatch(name, args, _orig=_orig_dispatch):
+        calls_made.append(name)
+        return _orig(name, args)
+    pipeline.dispatcher.dispatch = _tracking_dispatch     # type: ignore
 
     results = []
     table = Table(title="Eval Results", show_lines=True)
@@ -72,23 +90,12 @@ def run_eval() -> None:
         user_text = scenario["input"]
         console.print(f"[dim]Running: {sid}…[/dim]")
 
-        rag_ctx = retrieve(user_text)
-        messages = build_messages([], user_text, rag_context=rag_ctx)
+        # Reset capture for this scenario and run the full pipeline turn.
+        spoken_chunks.clear()
+        calls_made.clear()
+        pipeline.process_text(user_text)
 
-        # Track tool calls by monkey-patching dispatcher
-        calls_made: list[str] = []
-        original_dispatch = dispatcher.dispatch
-
-        def tracking_dispatch(name, args, _orig=original_dispatch):
-            calls_made.append(name)
-            return _orig(name, args)
-
-        dispatcher.dispatch = tracking_dispatch  # type: ignore
-
-        tokens = list(llm.stream_response(messages))
-        dispatcher.dispatch = original_dispatch  # type: ignore
-
-        response = "".join(tokens).strip()
+        response = " ".join(c.strip() for c in spoken_chunks).strip()
         passed, reason = score_scenario(scenario, response, calls_made)
 
         style = "green" if passed else "red"
