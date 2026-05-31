@@ -114,20 +114,35 @@ def _format_prompt(messages: list[dict[str, Any]], tokenizer) -> str:
         )
 
 
+def _loads_lenient(raw: str) -> dict | None:
+    """Parse a tool-call JSON body, tolerating common small-model quirks. Smaller models
+    (e.g. Qwen2.5-3B) sometimes echo the chat template's Jinja braces and emit doubled
+    braces — `{{"name": ...}}` — which is invalid JSON. Repair and retry before giving up."""
+    raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Collapse doubled braces, then retry.
+    repaired = raw.replace("{{", "{").replace("}}", "}")
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        return None
+
+
 def _parse_tool_calls(text: str) -> list[dict]:
     """Extract tool call dicts from the model output."""
     calls = []
     for raw in _TOOL_CALL_RE.findall(text):
-        try:
-            calls.append(json.loads(raw))
-        except json.JSONDecodeError:
-            pass
+        obj = _loads_lenient(raw)
+        if obj is not None:
+            calls.append(obj)
     if not calls:
         for name, args_str in _JSON_CALL_RE.findall(text):
-            try:
-                calls.append({"name": name, "arguments": json.loads(args_str)})
-            except json.JSONDecodeError:
-                pass
+            obj = _loads_lenient(args_str)
+            if obj is not None:
+                calls.append({"name": name, "arguments": obj})
     return calls
 
 

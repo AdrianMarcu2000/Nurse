@@ -47,3 +47,24 @@ def test_escalate(dispatcher):
 def test_unknown_tool(dispatcher):
     result = json.loads(dispatcher.dispatch("nonexistent_tool", {}))
     assert "error" in result
+
+
+# ── MLX tool-call parsing leniency (small-model doubled-brace quirk) ────────────
+
+def test_parse_tool_calls_repairs_doubled_braces():
+    """Qwen2.5-3B emits doubled braces ({{...}}) which is invalid JSON; the parser must
+    repair and recover the call. Single-brace (7B) and garbage must still behave."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
+    from nurse.llm.backends.mlx_backend import _parse_tool_calls
+
+    doubled = '<tool_call>\n{{"name": "log_vital", "arguments": {"type": "temperature", "value": "99.8 F"}}}\n</tool_call>'
+    got = _parse_tool_calls(doubled)
+    assert got and got[0]["name"] == "log_vital"
+    assert got[0]["arguments"]["type"] == "temperature"
+
+    single = '<tool_call>{"name": "set_reminder", "arguments": {"reason": "metformin", "time": "20:00"}}</tool_call>'
+    assert _parse_tool_calls(single)[0]["name"] == "set_reminder"
+
+    assert _parse_tool_calls('<tool_call>not json</tool_call>') == []
