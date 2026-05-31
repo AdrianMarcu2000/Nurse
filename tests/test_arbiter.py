@@ -155,3 +155,19 @@ def test_speak_text_stops_between_segments(monkeypatch):
 
     NursePipeline._speak_text(obj, "A. B.", stop_event=stop)
     assert played == [] and stopped == [1]              # nothing played; stop() called
+
+
+# ── Step 9: barge-in wiring (AEC echo behavior itself is live-only) ────────────
+
+def test_barge_in_disabled_by_default_is_safe_noop():
+    """With barge_in.enabled false (default), registering the callback must NOT activate
+    barge-in — the mic keeps its mute-during-playback fallback."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
+    from nurse.audio.input import MicrophoneStream
+    mic = MicrophoneStream()
+    mic.set_barge_in_callback(lambda: None)
+    assert mic._barge_in_enabled is False
+    assert mic._aec is None
+    assert mic._barge_in_active() is False

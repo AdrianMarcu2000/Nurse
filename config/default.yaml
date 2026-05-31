@@ -15,6 +15,16 @@ audio:
   # Chunk size in ms fed to VAD
   vad_chunk_ms: 32
 
+# ── Barge-in (interrupt Aria while she speaks) ─────────────────────────────────
+barge_in:
+  # Off by default: requires acoustic echo cancellation (speexdsp) + a suitable mic so
+  # Aria doesn't hear herself. When disabled, the mic is muted during playback (no
+  # barge-in) — the safe, always-working fallback.
+  enabled: false
+  # Consecutive speech chunks on the echo-cancelled mic before declaring a barge-in
+  # (debounce against transient noise / residual echo).
+  trigger_chunks: 4
+
 # ── ASR (Whisper) ──────────────────────────────────────────────────────────────
 asr:
   model_size: "tiny.en"           # tiny.en | base.en | small.en | medium.en

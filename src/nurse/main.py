@@ -98,6 +98,9 @@ def run(
         loop = asyncio.get_running_loop()
         mic = MicrophoneStream()
         pipeline.set_mic(mic)
+        # Barge-in: let the patient talk over Aria (active only if barge_in.enabled and an
+        # AEC backend is present; otherwise a harmless no-op — mic stays muted as before).
+        mic.set_barge_in_callback(pipeline.request_barge_in)
         # Prime the LLM (load weights + pre-fill the cached prompt prefix) before
         # greeting, so the patient's first utterance doesn't eat the cold-start.
         pipeline.llm.warmup()

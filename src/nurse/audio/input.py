@@ -39,6 +39,27 @@ class MicrophoneStream:
         # When set, the VAD processing thread discards all audio and resets state.
         self._muted = threading.Event()
         self._vad_started = False
+        # Barge-in: when enabled AND echo cancellation is available, the mic keeps
+        # listening (on the echo-cancelled stream) during playback and fires this callback
+        # on sustained patient speech, instead of discarding muted audio.
+        self._barge_in_cb = None
+        self._aec = None
+        self._barge_in_chunks = 0
+        bcfg = get_config().get("barge_in", {})
+        self._barge_in_enabled = bool(bcfg.get("enabled", False))
+        self._barge_in_trigger = int(bcfg.get("trigger_chunks", 4))
+
+    def set_barge_in_callback(self, callback) -> None:
+        """Register a callback fired when the patient speaks while Aria is talking.
+        Only active if barge_in is enabled and an AEC backend is available."""
+        self._barge_in_cb = callback
+        if self._barge_in_enabled:
+            from nurse.speech.aec import EchoCanceller
+            ec = EchoCanceller(self.chunk_samples, self.sample_rate)
+            self._aec = ec if ec.available() else None
+
+    def _barge_in_active(self) -> bool:
+        return self._barge_in_enabled and self._aec is not None and self._barge_in_cb is not None
 
     def mute(self) -> None:
         """Stop accepting audio — called while the robot is speaking."""
@@ -103,11 +124,30 @@ class MicrophoneStream:
                     if chunk is None:
                         break
 
-                    # While muted (robot is speaking), discard audio and reset VAD state
+                    # While muted (robot is speaking): normally discard audio. But if
+                    # barge-in is active, run VAD on the echo-cancelled mic and fire the
+                    # callback on sustained patient speech (talk-over interruption).
                     if self._muted.is_set():
                         speech_buffer = []
                         in_speech = False
                         silence_chunks = 0
+                        if self._barge_in_active():
+                            mono = chunk[:, 0] if chunk.ndim > 1 else chunk
+                            # No true reference frame wired yet → AEC passthrough; the real
+                            # reference is the speaker output (wired with the audio backend
+                            # on-device). VAD still gates on the (cancelled) stream.
+                            clean = self._aec.process(mono, np.zeros_like(mono))
+                            conf = vad_model(torch.from_numpy(clean).float(), self.sample_rate).item()
+                            if conf >= self.vad_threshold:
+                                self._barge_in_chunks += 1
+                                if self._barge_in_chunks >= self._barge_in_trigger:
+                                    self._barge_in_chunks = 0
+                                    try:
+                                        self._barge_in_cb()
+                                    except Exception:
+                                        pass
+                            else:
+                                self._barge_in_chunks = 0
                         continue
 
                     mono = chunk[:, 0] if chunk.ndim > 1 else chunk
