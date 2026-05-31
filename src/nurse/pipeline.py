@@ -23,7 +23,6 @@ from nurse.audio.output import Speaker
 from nurse.asr.whisper_stream import transcribe
 from nurse.config import get_config, get_persona
 from nurse.llm.client import LLMClient
-from nurse.llm.prompt import build_messages
 from nurse.llm.tools import ToolDispatcher
 from nurse.memory.longterm import LongTermMemory
 from nurse.memory.session import SessionMemory
@@ -61,6 +60,20 @@ class NursePipeline:
         # All speech goes through the arbiter (single TTS owner). Its speak_fn performs
         # the actual synth+playback via _render_speech; callers submit SpeechIntents.
         self.arbiter = SpeechArbiter(self._render_speech)
+        # The orchestrator conducts a turn: build Context, run the Front Voice, and
+        # (later steps) dispatch enrichment skills. The Front Voice is the only speaker.
+        self.orchestrator = self._build_orchestrator()
+
+    def _build_orchestrator(self):
+        """Construct the Front Voice + skill registry + orchestrator. Step 3 registers
+        only the Front Voice (no enrichment skills yet) → behavior parity with today."""
+        from nurse.skills.front_voice import LLMFrontVoice
+        from nurse.skills.orchestrator import Orchestrator
+        from nurse.skills.registry import SkillRegistry
+
+        front_voice = LLMFrontVoice(self.llm)
+        registry = SkillRegistry(front_voice, skills=[])
+        return Orchestrator(registry)
 
     def set_mic(self, mic) -> None:
         """Wire the mic so the pipeline can mute it while speaking."""
@@ -223,13 +236,11 @@ class NursePipeline:
         patient_summary = summary_future.result()
         rag_context = rag_future.result()
         t_rag = time.perf_counter()
-        messages = build_messages(
-            self.session.get_history(),
-            user_text,
-            patient_summary=patient_summary,
-            rag_context=rag_context,
-        )
-        escalated, messages = check_and_escalate(user_text, messages)
+
+        # Safety gate runs first, always — before the Front Voice. On a hit we escalate
+        # and bypass the model entirely (the messages arg is unused on the escalation
+        # path; we pass a minimal list).
+        escalated, _ = check_and_escalate(user_text, [{"role": "user", "content": user_text}])
 
         if escalated:
             # Dispatch the escalation tool ourselves too (writes the alert log)
@@ -248,9 +259,16 @@ class NursePipeline:
             self._transcript_log.append(f"Aria: {escalation_msg}")
             return
 
-        # 3. LLM stream + TTS
+        # 3. Orchestrator builds the Context and runs the Front Voice; we stream its
+        #    tokens to the sentence-buffer → arbiter → TTS.
         t_llm_start = time.perf_counter()
-        full_response, timing = self._stream_llm_and_speak(messages)
+        context = self.orchestrator.build_context(
+            user_text,
+            self.session.get_history(),
+            patient_summary,
+            rag_context,
+        )
+        full_response, timing = self._stream_and_speak(self.orchestrator.respond(context))
         t_end = time.perf_counter()
 
         # Break the turn into stages so the bottleneck is unambiguous. LLM and TTS
@@ -273,13 +291,13 @@ class NursePipeline:
         self.session.add_assistant(full_response)
         self._transcript_log.append(f"Aria: {full_response}")
 
-    def _stream_llm_and_speak(self, messages: list[dict]) -> tuple[str, dict]:
+    def _stream_and_speak(self, token_stream) -> tuple[str, dict]:
         """
-        Stream tokens from LLM. Accumulate into sentences.
+        Consume a stream of text tokens. Accumulate into sentences.
         As each sentence completes, synthesize and play immediately.
         Returns (full_response, timing) where timing has keys:
           first_audio — perf_counter when the first sentence began speaking (or None)
-          gen_ms      — cumulative ms spent waiting on LLM tokens
+          gen_ms      — cumulative ms spent waiting on tokens
           tts_ms      — cumulative ms spent synthesizing + playing audio
         """
         sentence_buffer = ""
@@ -295,7 +313,7 @@ class NursePipeline:
             timing["tts_ms"] += self._speak_text(text)
 
         t_tok = time.perf_counter()
-        for token in self.llm.stream_response(messages):
+        for token in token_stream:
             timing["gen_ms"] += (time.perf_counter() - t_tok) * 1000
             sentence_buffer += token
             full_response += token

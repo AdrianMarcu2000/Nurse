@@ -82,3 +82,40 @@ def test_router_score_counts_keyword_hits():
     router = SkillRouter([_Cardiac()])
     assert router.score(_Cardiac(), Context(user_text="my heart and chest")) == 2
     assert router.score(_Cardiac(), Context(user_text="nice weather")) == 0
+
+
+# ── Front Voice parity: builds the same messages the old pipeline did ──────────
+
+class _FakeLLM:
+    def __init__(self):
+        self.seen_messages = None
+    def stream_response(self, messages):
+        self.seen_messages = messages
+        yield "ok"
+
+
+def test_front_voice_builds_same_messages_as_build_messages():
+    from nurse.llm.prompt import build_messages
+    from nurse.skills.front_voice import LLMFrontVoice
+
+    history = [{"role": "user", "content": "earlier"}]
+    fake = _FakeLLM()
+    fv = LLMFrontVoice(fake)
+    ctx = Context(user_text="how are you", history=history,
+                  patient_summary="summary text", rag_context="rag text")
+    out = "".join(fv.respond(ctx))
+
+    expected = build_messages(history, "how are you",
+                              patient_summary="summary text", rag_context="rag text")
+    assert out == "ok"
+    assert fake.seen_messages == expected   # identical prompt to the old path
+
+
+def test_front_voice_weaves_findings_into_context():
+    from nurse.skills.front_voice import LLMFrontVoice
+    fake = _FakeLLM()
+    ctx = Context(user_text="hi", rag_context="")
+    ctx.add_finding(SkillFinding(source="vision", summary="patient on the floor"))
+    "".join(LLMFrontVoice(fake).respond(ctx))
+    system = fake.seen_messages[0]["content"]
+    assert "patient on the floor" in system   # finding reached the prompt
