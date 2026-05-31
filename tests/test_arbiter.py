@@ -100,3 +100,58 @@ def test_safety_intent_not_interruptible():
     arb._current = SpeechIntent(priority=PRIORITY_SAFETY, source="s", interruptible=False)
     arb.submit(SpeechIntent(priority=PRIORITY_SAFETY + 1, source="x"))
     assert not arb._stop_current.is_set()
+
+
+# ── Step 8: interruptible streaming + partial-draft semantics ──────────────────
+
+def test_stream_and_speak_interrupts_and_reports_spoken():
+    """_stream_and_speak halts when stop_event sets mid-stream and reports what was
+    actually spoken vs the full draft. Exercised on a minimal object that binds the real
+    method, with TTS stubbed (no audio)."""
+    import types
+    from nurse.pipeline import NursePipeline
+
+    obj = types.SimpleNamespace()
+    spoken_segments = []
+    stop = threading.Event()
+
+    def fake_speak_text(text, stop_event=None):
+        # Simulate the patient interrupting after the first spoken sentence.
+        spoken_segments.append(text)
+        stop.set()
+        return 1.0
+    obj._speak_text = fake_speak_text
+
+    def stream():
+        # Two sentences; the second should never be spoken (interrupted after the first).
+        for tok in ["Hello", " there.", " Second", " sentence."]:
+            yield tok
+
+    full, timing = NursePipeline._stream_and_speak(obj, stream(), stop_event=stop)
+    assert timing["interrupted"] is True
+    assert spoken_segments == ["Hello there."]          # only first sentence voiced
+    assert timing["spoken"] == "Hello there."
+    assert "Second" in full                              # full draft still captured
+
+
+def test_speak_text_stops_between_segments(monkeypatch):
+    """_speak_text checks stop_event between synthesized segments and calls speaker.stop()."""
+    import types
+    from nurse.pipeline import NursePipeline
+    import nurse.pipeline as pl
+
+    played, stopped = [], []
+    stop = threading.Event()
+    stop.set()                                          # already requested → stop immediately
+
+    obj = types.SimpleNamespace()
+    obj._mic = None
+    obj.speaker = types.SimpleNamespace(
+        play=lambda audio, sample_rate=None: played.append(1),
+        stop=lambda: stopped.append(1),
+    )
+    monkeypatch.setattr(pl, "synthesize_sentences",
+                        lambda text: iter([("audioA", "A"), ("audioB", "B")]))
+
+    NursePipeline._speak_text(obj, "A. B.", stop_event=stop)
+    assert played == [] and stopped == [1]              # nothing played; stop() called

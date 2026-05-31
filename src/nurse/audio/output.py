@@ -19,6 +19,10 @@ class Speaker:
         sd.play(audio, samplerate=sr, device=self.output_device)
         sd.wait()
 
+    def stop(self) -> None:
+        """Immediately stop any in-progress playback (used for barge-in)."""
+        sd.stop()
+
     def play_chunks(self, chunks: list[np.ndarray], sample_rate: int | None = None) -> None:
         """Play a sequence of audio chunks in order."""
         if not chunks:

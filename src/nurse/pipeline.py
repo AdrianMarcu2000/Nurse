@@ -63,6 +63,15 @@ class NursePipeline:
         # The orchestrator conducts a turn: build Context, run the Front Voice, and
         # (later steps) dispatch enrichment skills. The Front Voice is the only speaker.
         self.orchestrator = self._build_orchestrator()
+        # Set to interrupt the in-progress reactive utterance (barge-in). Cleared at the
+        # start of each turn; raised by request_barge_in() (button now; AEC/VAD in Step 9).
+        self._turn_stop = threading.Event()
+
+    def request_barge_in(self) -> None:
+        """Signal that the patient wants to interrupt the current utterance. Stops the
+        reactive stream and the arbiter's current (interruptible) intent."""
+        self._turn_stop.set()
+        self.arbiter.stop()
 
     def _build_orchestrator(self):
         """Construct the Front Voice + skill registry + orchestrator. Enrichment skills
@@ -270,6 +279,7 @@ class NursePipeline:
 
         # 3. Orchestrator builds the Context and runs the Front Voice; we stream its
         #    tokens to the sentence-buffer → arbiter → TTS.
+        self._turn_stop.clear()
         t_llm_start = time.perf_counter()
         context = self.orchestrator.build_context(
             user_text,
@@ -277,16 +287,23 @@ class NursePipeline:
             patient_summary,
             rag_context,
         )
-        full_response, timing = self._stream_and_speak(self.orchestrator.respond(context))
+        full_response, timing = self._stream_and_speak(
+            self.orchestrator.respond(context), stop_event=self._turn_stop)
+
+        if timing["interrupted"]:
+            # Barge-in: keep the full draft in history but mark what was actually voiced
+            # so the model has continuity without re-speaking the cut-off answer.
+            self._record_partial(user_text, full_response, timing["spoken"])
+            return
 
         # A specialist that finished AFTER the opener enriches the turn: the Front Voice
         # continues in its own words with the new finding (still one voice). Skipped when
         # no specialist was pending.
         late = self.orchestrator.collect_pending(context, timeout=5.0)
-        if late:
+        if late and not self._turn_stop.is_set():
             cont, cont_timing = self._stream_and_speak(
-                self.orchestrator.registry.front_voice.respond(context)
-            )
+                self.orchestrator.registry.front_voice.respond(context),
+                stop_event=self._turn_stop)
             if cont.strip():
                 full_response = f"{full_response} {cont}".strip()
         t_end = time.perf_counter()
@@ -320,7 +337,7 @@ class NursePipeline:
                     f"[observed {finding.observed_at:%H:%M}] ({finding.source}) {finding.summary}"
                 )
 
-    def _stream_and_speak(self, token_stream) -> tuple[str, dict]:
+    def _stream_and_speak(self, token_stream, stop_event=None) -> tuple[str, dict]:
         """
         Consume a stream of text tokens. Accumulate into sentences.
         As each sentence completes, synthesize and play immediately.
@@ -328,21 +345,33 @@ class NursePipeline:
           first_audio — perf_counter when the first sentence began speaking (or None)
           gen_ms      — cumulative ms spent waiting on tokens
           tts_ms      — cumulative ms spent synthesizing + playing audio
+          spoken      — the text actually voiced (may be < full_response if interrupted)
+          interrupted — True if barge-in stopped this turn mid-stream
+        If `stop_event` is set during the turn, streaming/playback halts (barge-in).
         """
         sentence_buffer = ""
         full_response = ""
-        timing = {"first_audio": None, "gen_ms": 0.0, "tts_ms": 0.0}
+        # `spoken` is what actually reached the speaker; `interrupted` flags a barge-in.
+        timing = {"first_audio": None, "gen_ms": 0.0, "tts_ms": 0.0,
+                  "spoken": "", "interrupted": False}
 
         import re
         sentence_end = re.compile(r'[.!?]\s')
 
+        def stopped() -> bool:
+            return stop_event is not None and stop_event.is_set()
+
         def speak(text: str) -> None:
             if timing["first_audio"] is None:
                 timing["first_audio"] = time.perf_counter()
-            timing["tts_ms"] += self._speak_text(text)
+            timing["tts_ms"] += self._speak_text(text, stop_event=stop_event)
+            timing["spoken"] = (timing["spoken"] + " " + text).strip()
 
         t_tok = time.perf_counter()
         for token in token_stream:
+            if stopped():
+                timing["interrupted"] = True
+                break
             timing["gen_ms"] += (time.perf_counter() - t_tok) * 1000
             sentence_buffer += token
             full_response += token
@@ -363,23 +392,29 @@ class NursePipeline:
                         speak(to_speak)
             t_tok = time.perf_counter()
 
-        # Speak any remaining buffer
-        if sentence_buffer.strip():
+        # Speak any remaining buffer (unless interrupted)
+        if sentence_buffer.strip() and not stopped():
             speak(sentence_buffer.strip())
+        elif stopped():
+            timing["interrupted"] = True
 
         return full_response.strip(), timing
 
-    def _speak_text(self, text: str) -> float:
+    def _speak_text(self, text: str, stop_event=None) -> float:
         """Synthesize text and play it through the speaker. Mutes mic during playback.
         Returns the wall-clock ms spent synthesizing + playing.
 
-        Low-level renderer. In Step 8 the per-chunk loop will consult a stop_event for
-        barge-in; today it plays each sentence to completion."""
+        Interruptible: between sentence segments (the natural chunk boundary) we check
+        stop_event; if set, we stop playback and return early (barge-in). The unspoken
+        remainder is the caller's concern (it marks the draft partial)."""
         t0 = time.perf_counter()
         if self._mic:
             self._mic.mute()
         try:
             for audio_chunk, sentence in synthesize_sentences(text):
+                if stop_event is not None and stop_event.is_set():
+                    self.speaker.stop()
+                    break
                 logger.debug("Speaking: %s", sentence)
                 self.speaker.play(audio_chunk, sample_rate=SAMPLE_RATE)
         finally:
@@ -389,16 +424,16 @@ class NursePipeline:
 
     def _render_speech(self, text_or_stream, stop_event) -> None:
         """The SpeechArbiter's speak_fn: render a text string (or a token stream) to the
-        speaker. stop_event is honored per-chunk in Step 8; ignored for now."""
+        speaker, honoring stop_event between sentence chunks (barge-in)."""
         if isinstance(text_or_stream, str):
-            self._speak_text(text_or_stream)
+            self._speak_text(text_or_stream, stop_event=stop_event)
         else:
-            # A token stream: accumulate to sentences and speak each (same as the
-            # reactive path). Used once responders stream through the arbiter.
             buf = ""
             import re
             sentence_end = re.compile(r"[.!?]\s")
             for token in text_or_stream:
+                if stop_event is not None and stop_event.is_set():
+                    return
                 buf += token
                 if sentence_end.search(buf):
                     parts = sentence_end.split(buf)
@@ -406,13 +441,27 @@ class NursePipeline:
                         to_speak = buf[: buf.rfind(parts[-1])].strip()
                         buf = parts[-1]
                         if to_speak:
-                            self._speak_text(to_speak)
-            if buf.strip():
-                self._speak_text(buf.strip())
+                            self._speak_text(to_speak, stop_event=stop_event)
+            if buf.strip() and not (stop_event is not None and stop_event.is_set()):
+                self._speak_text(buf.strip(), stop_event=stop_event)
 
     def _say(self, text: str, priority: int = PRIORITY_REACTIVE, source: str = "aria") -> None:
         """Speak a discrete utterance through the arbiter (the single TTS owner)."""
         self.arbiter.speak_now(SpeechIntent(priority=priority, source=source, text_or_stream=text))
+
+    def _record_partial(self, user_text: str, full_draft: str, spoken: str) -> None:
+        """Record an interrupted reply: the full draft is kept in history flagged as only
+        partially delivered (so the Front Voice has continuity and won't re-speak it), and
+        the transcript notes what was actually voiced."""
+        self.session.add_user(user_text)
+        # Store the full draft but annotate that only `spoken` reached the patient.
+        marked = (f"{full_draft}\n[delivered: partial — only said: "
+                  f"\"{spoken}\" before the patient interrupted]")
+        self.session.add_assistant(marked)
+        self._transcript_log.append(f"Patient: {user_text}")
+        self._transcript_log.append(f"Aria (interrupted, said): {spoken}")
+        logger.info("Turn interrupted (barge-in); spoken=%r of draft len %d",
+                    spoken, len(full_draft))
 
     def end_session(self) -> None:
         """Update long-term memory with a dated summary of this session."""
