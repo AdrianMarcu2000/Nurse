@@ -49,7 +49,11 @@ class Orchestrator:
         """
         skills = self.router.select(context)
         if not skills:
+            logger.info("Turn agents — front_voice only (no enrichment skills selected)")
             return self.registry.front_voice.respond(context)
+
+        logger.info("Turn agents — front_voice + %d skill(s) invoked: %s",
+                    len(skills), [s.name for s in skills])
 
         # Dispatch every selected skill in the background, off the voice path.
         futures = {self._executor.submit(self._safe_run, s, context): s for s in skills}
@@ -60,10 +64,17 @@ class Orchestrator:
             return_when=concurrent.futures.FIRST_COMPLETED,
         )
         # Fold whatever finished in time into the context (newest observation wins later).
+        ready, pending = [], []
         for fut in done:
             finding = fut.result()
             if finding is not None:
                 context.add_finding(finding)
+                ready.append(futures[fut].name)
+        for fut in futures:
+            if fut not in done:
+                pending.append(futures[fut].name)
+        logger.info("Open-the-turn race — ready by %.1fs: %s | still running: %s",
+                    self.open_deadline_s, ready or "none", pending or "none")
 
         # Whether or not a specialist opened, the Front Voice speaks — with any findings
         # already in context, it opens with the better answer; otherwise from its own
@@ -90,6 +101,9 @@ class Orchestrator:
             if finding is not None:
                 context.add_finding(finding)
                 added.append(finding)
+        if added:
+            logger.info("Late enrichment after opener: %s — Front Voice will continue",
+                        [f.source for f in added])
         return added
 
     @staticmethod
