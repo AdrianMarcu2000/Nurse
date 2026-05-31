@@ -46,12 +46,23 @@ class Context:
     def add_finding(self, finding: SkillFinding) -> None:
         self.findings.append(finding)
 
-    def findings_text(self) -> str:
-        """Render current findings for injection into the Front Voice's prompt, newest
+    def fresh_findings(self, max_age_s: float | None = None,
+                       now: datetime | None = None) -> list[SkillFinding]:
+        """Findings newer than `max_age_s` (by observed_at), newest first. This is the
+        recency filter: a late-returning async finding whose observation is older than the
+        window is dropped, so it can't masquerade as 'now'. `None` = no age limit."""
+        now = now or datetime.now()
+        items = self.findings
+        if max_age_s is not None:
+            items = [f for f in items if (now - f.observed_at).total_seconds() <= max_age_s]
+        return sorted(items, key=lambda f: f.observed_at, reverse=True)
+
+    def findings_text(self, max_age_s: float | None = None) -> str:
+        """Render fresh findings for injection into the Front Voice's prompt, newest
         first. Empty string when there are none."""
-        if not self.findings:
+        ordered = self.fresh_findings(max_age_s)
+        if not ordered:
             return ""
-        ordered = sorted(self.findings, key=lambda f: f.observed_at, reverse=True)
         return "\n".join(f"- ({f.source}) {f.summary}" for f in ordered)
 
 

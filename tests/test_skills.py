@@ -198,3 +198,54 @@ def test_no_specialist_selected_is_plain_front_voice():
     list(o.respond(ctx))
     assert voice.findings_at_respond[0] == 0
     assert o.collect_pending(ctx) == []
+
+
+# ── Step 6: sensing skills, recency fusion, promotion ──────────────────────────
+
+@pytest.fixture
+def sense_dir(tmp_path, monkeypatch):
+    """Redirect data/sense (and config resolve) to tmp_path; clear config cache."""
+    import nurse.config as cfg_module
+    orig = cfg_module.resolve
+    def patched(rel):
+        if rel == "data/sense":
+            return tmp_path
+        return orig(rel)
+    monkeypatch.setattr(cfg_module, "resolve", patched)
+    import nurse.skills.sensing.vision as vmod
+    monkeypatch.setattr(vmod, "resolve", patched)
+    return tmp_path
+
+
+def test_vision_skill_reads_json_sidecar(sense_dir, monkeypatch):
+    import json
+    from nurse.skills.sensing.vision import VisionSkill
+    (sense_dir / "last_image.json").write_text(json.dumps(
+        {"summary": "patient is on the floor", "observed_at": "2026-05-31T14:30:00"}))
+    skill = VisionSkill(model_id="some-vlm")     # model_id set → available
+    assert skill.available()
+    finding = skill.run(Context(user_text="anything"))
+    assert finding.source == "vision"
+    assert "on the floor" in finding.summary
+    assert finding.keep is True
+    assert finding.observed_at.hour == 14
+
+
+def test_vision_skill_disabled_without_model_or_input(sense_dir, monkeypatch):
+    import nurse.skills.sensing.vision as vmod
+    monkeypatch.setattr(vmod, "resolve", lambda rel: sense_dir)
+    from nurse.skills.sensing.vision import VisionSkill
+    assert VisionSkill(model_id=None).available() is False        # no model
+    assert VisionSkill(model_id="vlm").available() is False       # model but no input
+
+
+def test_recency_window_drops_stale_finding():
+    now = datetime(2026, 6, 1, 12, 0, 0)
+    ctx = Context(user_text="x")
+    ctx.add_finding(SkillFinding(source="vision", summary="fresh",
+                                 observed_at=now - timedelta(seconds=10)))
+    ctx.add_finding(SkillFinding(source="vision", summary="stale",
+                                 observed_at=now - timedelta(seconds=600)))
+    fresh = ctx.fresh_findings(max_age_s=120, now=now)
+    summaries = [f.summary for f in fresh]
+    assert summaries == ["fresh"]                 # stale (10 min) dropped, only fresh kept

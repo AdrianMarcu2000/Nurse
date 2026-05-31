@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+from nurse.config import get_config
 from nurse.llm.client import LLMClient
 from nurse.llm.prompt import build_messages
 from nurse.skills.base import Context, FrontVoice
@@ -18,6 +19,9 @@ from nurse.skills.base import Context, FrontVoice
 class LLMFrontVoice(FrontVoice):
     def __init__(self, llm: LLMClient) -> None:
         self.llm = llm
+        self._finding_max_age_s = (
+            get_config().get("skills", {}).get("finding_max_age_s", 120.0)
+        )
 
     def respond(self, context: Context) -> Iterator[str]:
         messages = build_messages(
@@ -28,11 +32,11 @@ class LLMFrontVoice(FrontVoice):
         )
         yield from self.llm.stream_response(messages)
 
-    @staticmethod
-    def _with_findings(context: Context) -> str:
-        """Fold any skill findings into the RAG-context slot so the Front Voice can
-        reference them ('I can see…'). Empty findings → just the RAG context."""
-        findings = context.findings_text()
+    def _with_findings(self, context: Context) -> str:
+        """Fold fresh skill findings into the RAG-context slot so the Front Voice can
+        reference them ('I can see…'). Stale findings (older than the window) are dropped
+        so a late async result can't masquerade as current. Empty → just the RAG context."""
+        findings = context.findings_text(max_age_s=self._finding_max_age_s)
         if not findings:
             return context.rag_context
         block = f"## What you are currently observing\n{findings}"

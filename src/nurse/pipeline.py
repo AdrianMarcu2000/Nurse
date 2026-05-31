@@ -72,9 +72,15 @@ class NursePipeline:
         from nurse.skills.front_voice import LLMFrontVoice
         from nurse.skills.orchestrator import Orchestrator
         from nurse.skills.registry import SkillRegistry
+        from nurse.skills.sensing.audio_scene import AudioSceneSkill
+        from nurse.skills.sensing.vision import VisionSkill
 
         front_voice = LLMFrontVoice(self.llm)
-        candidate_skills = [CardiacSkill(dispatcher=self.dispatcher)]
+        candidate_skills = [
+            CardiacSkill(dispatcher=self.dispatcher),
+            VisionSkill(),
+            AudioSceneSkill(),
+        ]
         registry = SkillRegistry.from_config(front_voice, candidate_skills)
         return Orchestrator(registry, executor=self._executor)
 
@@ -304,6 +310,15 @@ class NursePipeline:
         self.session.add_user(user_text)
         self.session.add_assistant(full_response)
         self._transcript_log.append(f"Aria: {full_response}")
+
+        # 5. Promote keep-worthy findings into the transcript so they persist into
+        #    long-term memory at session end (e.g. "noticed Octavian on the floor").
+        #    Transient findings (keep=False) are used this turn and dropped.
+        for finding in context.findings:
+            if finding.keep:
+                self._transcript_log.append(
+                    f"[observed {finding.observed_at:%H:%M}] ({finding.source}) {finding.summary}"
+                )
 
     def _stream_and_speak(self, token_stream) -> tuple[str, dict]:
         """
