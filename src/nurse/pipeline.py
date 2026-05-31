@@ -65,15 +65,18 @@ class NursePipeline:
         self.orchestrator = self._build_orchestrator()
 
     def _build_orchestrator(self):
-        """Construct the Front Voice + skill registry + orchestrator. Step 3 registers
-        only the Front Voice (no enrichment skills yet) → behavior parity with today."""
+        """Construct the Front Voice + skill registry + orchestrator. Enrichment skills
+        are registered only when their model is configured/available (graceful disable),
+        so with no skill config this is behavior-identical to the bare Front Voice."""
+        from nurse.skills.cardiac import CardiacSkill
         from nurse.skills.front_voice import LLMFrontVoice
         from nurse.skills.orchestrator import Orchestrator
         from nurse.skills.registry import SkillRegistry
 
         front_voice = LLMFrontVoice(self.llm)
-        registry = SkillRegistry(front_voice, skills=[])
-        return Orchestrator(registry)
+        candidate_skills = [CardiacSkill(dispatcher=self.dispatcher)]
+        registry = SkillRegistry.from_config(front_voice, candidate_skills)
+        return Orchestrator(registry, executor=self._executor)
 
     def set_mic(self, mic) -> None:
         """Wire the mic so the pipeline can mute it while speaking."""
@@ -269,6 +272,17 @@ class NursePipeline:
             rag_context,
         )
         full_response, timing = self._stream_and_speak(self.orchestrator.respond(context))
+
+        # A specialist that finished AFTER the opener enriches the turn: the Front Voice
+        # continues in its own words with the new finding (still one voice). Skipped when
+        # no specialist was pending.
+        late = self.orchestrator.collect_pending(context, timeout=5.0)
+        if late:
+            cont, cont_timing = self._stream_and_speak(
+                self.orchestrator.registry.front_voice.respond(context)
+            )
+            if cont.strip():
+                full_response = f"{full_response} {cont}".strip()
         t_end = time.perf_counter()
 
         # Break the turn into stages so the bottleneck is unambiguous. LLM and TTS

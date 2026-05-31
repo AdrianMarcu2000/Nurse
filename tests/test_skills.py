@@ -130,3 +130,71 @@ def test_persona_allows_companion_and_keeps_clinical_rules():
     assert "not a doctor" in sp                  # clinical hard-rule intact
     assert "escalate" in sp                      # escalation rule intact
     assert "never discuss topics unrelated" not in sp   # blanket ban removed
+
+
+# ── Step 5: open-the-turn race ──────────────────────────────────────────────────
+
+import time as _time
+
+
+class _SlowSkill(Skill):
+    name = "cardiac"
+    domain_keywords = ["heart"]
+    def __init__(self, delay, summary="HR high"):
+        self._delay = delay
+        self._summary = summary
+    def run(self, context):
+        _time.sleep(self._delay)
+        return SkillFinding(source="cardiac", summary=self._summary)
+
+
+class _RecordingVoice(FrontVoice):
+    """Records how many findings were in context when it was asked to respond."""
+    def __init__(self):
+        self.findings_at_respond = []
+    def respond(self, context):
+        self.findings_at_respond.append(len(context.findings))
+        yield "spoken"
+
+
+def _orch(skills, voice, deadline):
+    from nurse.skills.orchestrator import Orchestrator
+    from nurse.skills.registry import SkillRegistry
+    from nurse.skills.router import SkillRouter
+    reg = SkillRegistry(voice, skills)
+    o = Orchestrator(reg, router=SkillRouter(skills))
+    o.open_deadline_s = deadline
+    return o
+
+
+def test_fast_specialist_opens_the_turn():
+    # Specialist returns well before the deadline → its finding is in context when the
+    # Front Voice opens (the Front Voice relays the better answer).
+    voice = _RecordingVoice()
+    o = _orch([_SlowSkill(delay=0.01)], voice, deadline=0.5)
+    ctx = o.build_context("my heart is racing", [], "", "")
+    list(o.respond(ctx))
+    assert voice.findings_at_respond[0] == 1      # finding present at open
+    assert len(ctx.findings) == 1
+
+
+def test_slow_specialist_does_not_delay_opener_then_enriches():
+    # Specialist misses the deadline → Front Voice opens with NO finding; the finding is
+    # then collected afterwards for the continuation.
+    voice = _RecordingVoice()
+    o = _orch([_SlowSkill(delay=0.3)], voice, deadline=0.05)
+    ctx = o.build_context("my heart is racing", [], "", "")
+    list(o.respond(ctx))
+    assert voice.findings_at_respond[0] == 0      # opener had no finding (not delayed)
+    late = o.collect_pending(ctx, timeout=2.0)
+    assert len(late) == 1 and len(ctx.findings) == 1   # enriched after the opener
+
+
+def test_no_specialist_selected_is_plain_front_voice():
+    voice = _RecordingVoice()
+    o = _orch([_SlowSkill(delay=0.01)], voice, deadline=0.5)
+    # Chit-chat: cardiac (keyword "heart") not matched → no skills run.
+    ctx = o.build_context("tell me about Rome", [], "", "")
+    list(o.respond(ctx))
+    assert voice.findings_at_respond[0] == 0
+    assert o.collect_pending(ctx) == []
