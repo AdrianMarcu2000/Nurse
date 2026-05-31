@@ -125,6 +125,7 @@ class NursePipeline:
 
         if not latest and not facts:
             # No history at all — nothing to personalize from beyond the name.
+            logger.info("Greeting: %s", fallback)
             self._say(fallback, source="greeting")
             self._transcript_log.append(f"Aria: {fallback}")
             self._last_interaction = datetime.now()
@@ -201,8 +202,9 @@ class NursePipeline:
             timeout = get_config()["proactive"]["engage_response_timeout_seconds"]
 
             # 1. Ask permission.
-            self._say(get_config()["proactive"]["engage_prompt"],
-                      priority=PRIORITY_PROACTIVE, source="engage")
+            engage_prompt = get_config()["proactive"]["engage_prompt"]
+            logger.info("Aria (engage ask) → user: %s", engage_prompt)
+            self._say(engage_prompt, priority=PRIORITY_PROACTIVE, source="engage")
 
             # 2. Listen for one reply, bounded by the engage timeout. Silence (None)
             #    is a no-response, distinct from a spoken decline.
@@ -216,6 +218,7 @@ class NursePipeline:
             logger.info("Engage (%s) reply=%r → %s", engagement.kind, reply, verdict)
 
             if verdict != "yes":
+                logger.info("Aria (engage declined) → user: %s", pro["declined"])
                 self._say(pro["declined"], priority=PRIORITY_PROACTIVE, source="engage")
                 self._last_interaction = datetime.now()
                 return "declined"
@@ -224,6 +227,7 @@ class NursePipeline:
             #    patient can respond and Aria can help / log / escalate as usual. The
             #    follow-up turn blocks normally — he's already engaged.
             message = pro[engagement.kind].format(detail=engagement.detail)
+            logger.info("Aria (proactive %s) → user: %s", engagement.kind, message)
             self._say(message, priority=PRIORITY_PROACTIVE, source="engage")
             self._transcript_log.append(f"Aria (proactive {engagement.kind}): {message}")
             self._last_interaction = datetime.now()
@@ -285,6 +289,7 @@ class NursePipeline:
             # Deliver the canned escalation message immediately (top priority,
             # non-interruptible — must finish alerting).
             escalation_msg = get_persona()["escalation_message"]
+            logger.info("Aria (escalation) → user: %s", escalation_msg)
             self.arbiter.speak_now(SpeechIntent(
                 priority=PRIORITY_SAFETY, source="safety",
                 text_or_stream=escalation_msg, interruptible=False))

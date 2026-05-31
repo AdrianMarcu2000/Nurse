@@ -1,12 +1,15 @@
 """Faster-Whisper ASR wrapper — transcribes a numpy audio array."""
 from __future__ import annotations
 
+import logging
 import time
 from functools import lru_cache
 
 import numpy as np
 
 from nurse.config import get_config
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -53,6 +56,9 @@ def transcribe(audio: np.ndarray) -> str:
     text = " ".join(seg.text for seg in segments).strip()
     elapsed = (time.perf_counter() - t0) * 1000
     if text:
+        # Log the patient's words so the full exchange is captured in logs/nurse.log
+        # (the console print alone bypassed the logger / file log).
+        logger.info("User said (%.0fms ASR): %s", elapsed, text)
         from rich.console import Console
         Console().print(f"[dim]ASR {elapsed:.0f}ms:[/dim] {text}")
     return text
