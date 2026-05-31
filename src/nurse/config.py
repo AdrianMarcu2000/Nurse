@@ -17,23 +17,37 @@ def _load(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+# Runtime overrides set before startup (e.g. by a CLI flag). Merged last, above
+# default.yaml and local.yaml, so a launch-time choice wins.
+_OVERRIDES: dict[str, Any] = {}
+
+
+def set_overrides(overrides: dict[str, Any]) -> None:
+    """Apply in-process config overrides (deep-merged on top of files). Must be called
+    before get_config() is first read; clears the cache so the change takes effect."""
+    global _OVERRIDES
+    _OVERRIDES = _deep_merge(_OVERRIDES, overrides)
+    get_config.cache_clear()
+
+
 @lru_cache(maxsize=1)
 def get_config() -> dict[str, Any]:
     cfg = _load(ROOT / "config" / "default.yaml")
     local = ROOT / "config" / "local.yaml"
     if local.exists():
-        import collections.abc
-
-        def deep_merge(base: dict, override: dict) -> dict:
-            out = dict(base)
-            for k, v in override.items():
-                if isinstance(v, dict) and isinstance(out.get(k), dict):
-                    out[k] = deep_merge(out[k], v)
-                else:
-                    out[k] = v
-            return out
-
-        cfg = deep_merge(cfg, _load(local))
+        cfg = _deep_merge(cfg, _load(local))
+    if _OVERRIDES:
+        cfg = _deep_merge(cfg, _OVERRIDES)
     return cfg
 
 

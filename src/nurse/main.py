@@ -14,6 +14,30 @@ from rich.panel import Panel
 console = Console()
 app = typer.Typer(add_completion=False)
 
+# Front Voice model presets, selectable at launch with --model/-m. Trade speed vs
+# capability: 1.5b is fastest but can't reliably tool-call; 7b is tool-capable but slow
+# on a memory-pressured Mac (fine on the Orin). Any other value is passed through as a
+# raw MLX/GGUF model id.
+_MODEL_ALIASES = {
+    "1.5b": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "3b": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+    "7b": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+}
+
+
+def _apply_model_override(model: str | None) -> str | None:
+    """Resolve a --model alias (or raw id) and apply it as a config override. Returns the
+    effective model id, or None if no override was requested."""
+    if not model:
+        return None
+    from nurse.config import set_overrides
+    model_id = _MODEL_ALIASES.get(model.lower(), model)
+    # Aliases are MLX (Mac) ids; override the MLX backend's model. On the llama.cpp
+    # backend (Orin) pass a GGUF path as --model to override model_path instead.
+    key = "model_path" if model_id.endswith(".gguf") else "mlx_model"
+    set_overrides({"llm": {key: model_id}})
+    return model_id
+
 # Libraries whose DEBUG output is pure noise (HTTP wire logs, model fetch chatter).
 # Pinned to WARNING on every handler so even the file log stays readable.
 _NOISY_LIBS = (
@@ -67,14 +91,18 @@ def run(
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     no_rag: bool = typer.Option(False, "--no-rag", help="Disable RAG retrieval"),
     no_proactive: bool = typer.Option(False, "--no-proactive", help="Disable proactive engagement"),
+    model: str = typer.Option(None, "--model", "-m",
+                              help="Front Voice model: 1.5b | 3b | 7b (or a raw model id)."),
 ) -> None:
     """Start the Nurse Brain voice assistant."""
+    effective_model = _apply_model_override(model)
     log_path = _setup_logging(verbose)
 
     console.print(Panel.fit(
         "[bold cyan]Nurse Brain[/bold cyan]\n"
         f"Patient: [green]{patient}[/green]  |  RAG: {'off' if no_rag else 'on'}"
         f"  |  Proactive: {'off' if no_proactive else 'on'}\n"
+        f"[dim]Model: {effective_model or 'config default'}[/dim]\n"
         f"[dim]Log: {log_path}[/dim]\n"
         "[dim]Ctrl+C to end session[/dim]",
         border_style="cyan",
@@ -155,10 +183,13 @@ def devices() -> None:
 def bench(
     patient: str = typer.Option("default", "--patient", "-p"),
     text: str = typer.Option("I have a headache and my temperature is 99.2 degrees.", "--text", "-t"),
+    model: str = typer.Option(None, "--model", "-m",
+                              help="Front Voice model: 1.5b | 3b | 7b (or a raw model id)."),
 ) -> None:
     """Benchmark end-to-end latency without microphone input."""
     import time
     import numpy as np
+    _apply_model_override(model)
     from nurse.pipeline import NursePipeline
 
     _setup_logging(False)
