@@ -12,6 +12,25 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def load_secrets() -> None:
+    """Load KEY=value lines from the gitignored config/secrets.env into os.environ.
+
+    This is how secrets (e.g. ANTHROPIC_API_KEY) live "next to the config" without ever
+    entering the repo: secrets.env is gitignored and never committed. Existing env vars
+    win, so an explicit `export` still overrides the file. Call once at startup."""
+    path = ROOT / "config" / "secrets.env"
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def _load(path: Path) -> dict[str, Any]:
     with open(path) as f:
         return yaml.safe_load(f) or {}

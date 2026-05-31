@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.request
 
 logger = logging.getLogger(__name__)
@@ -63,12 +64,18 @@ class AnthropicClient:
                 "content-type": "application/json",
             },
         )
+        # Make the network call unmistakable in the log: the device is reaching off-box.
+        logger.info("CLOUD CALL → Anthropic %s | input: %r", self.model, user)
+        t0 = time.perf_counter()
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
                 data = json.loads(resp.read().decode("utf-8"))
             # Messages API returns {"content": [{"type":"text","text": "..."}], ...}
             parts = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
-            return "".join(parts).strip()
+            text = "".join(parts).strip()
+            logger.info("CLOUD REPLY ← Anthropic %s (%.0fms): %s",
+                        self.model, (time.perf_counter() - t0) * 1000, text)
+            return text
         except Exception as e:
-            logger.warning("Anthropic API call failed: %s", e)
+            logger.warning("CLOUD CALL FAILED ← Anthropic %s: %s", self.model, e)
             return ""

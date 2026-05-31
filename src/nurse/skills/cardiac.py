@@ -74,6 +74,6 @@ class CardiacSkill(Skill):
             text = "".join(self._client().stream_response(messages)).strip()
         if not text:
             return None
-        logger.info("CardiacSkill finding (%s): %s",
-                    self.cloud_model if self._is_cloud() else self.model_id, text)
+        where = f"cloud:anthropic/{self.cloud_model}" if self._is_cloud() else f"on_device/{self.model_id}"
+        logger.info("CardiacSkill finding [%s]: %s", where, text)
         return SkillFinding(source="cardiac", summary=text, confidence=0.8, keep=True)

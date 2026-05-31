@@ -131,6 +131,8 @@ def run(
                                       help="Disable press-Enter-to-interrupt (barge-in) while Aria speaks."),
 ) -> None:
     """Start the Nurse Brain voice assistant."""
+    from nurse.config import load_secrets
+    load_secrets()  # load config/secrets.env (gitignored) into the environment
     effective_model = _apply_model_override(model)
     effective_specialist = _apply_specialist_override(specialist)
     log_path = _setup_logging(verbose)

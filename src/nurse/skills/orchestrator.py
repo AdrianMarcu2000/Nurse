@@ -64,17 +64,23 @@ class Orchestrator:
             return_when=concurrent.futures.FIRST_COMPLETED,
         )
         # Fold whatever finished in time into the context (newest observation wins later).
+        # Tag each by location so cloud vs on-device contributions are obvious in the log.
+        def _tag(skill) -> str:
+            return f"{skill.name}[{getattr(skill, 'location', 'on_device')}]"
+
         ready, pending = [], []
         for fut in done:
             finding = fut.result()
             if finding is not None:
                 context.add_finding(finding)
-                ready.append(futures[fut].name)
+                ready.append(_tag(futures[fut]))
         for fut in futures:
             if fut not in done:
-                pending.append(futures[fut].name)
+                pending.append(_tag(futures[fut]))
         logger.info("Open-the-turn race — ready by %.1fs: %s | still running: %s",
                     self.open_deadline_s, ready or "none", pending or "none")
+        if ready:
+            logger.info("Contribution → these findings are woven into the spoken reply: %s", ready)
 
         # Whether or not a specialist opened, the Front Voice speaks — with any findings
         # already in context, it opens with the better answer; otherwise from its own

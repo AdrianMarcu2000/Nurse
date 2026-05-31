@@ -17,3 +17,7 @@ dist/
 build/
 .pytest_cache/
 config/local.yaml
+
+# Secrets (never commit real keys)
+config/secrets.env
+.env
