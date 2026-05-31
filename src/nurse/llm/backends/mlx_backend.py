@@ -85,6 +85,12 @@ def _common_prefix_len(a: list[int], b: list[int]) -> int:
 
 def _format_prompt(messages: list[dict[str, Any]], tokenizer) -> str:
     """Apply the model's chat template, injecting tool schemas."""
+    # Some chat templates (e.g. Qwen2.5) concatenate message content directly and crash
+    # on a None content. Normalize any None content to "" before rendering.
+    messages = [
+        {**m, "content": ("" if m.get("content") is None else m["content"])}
+        for m in messages
+    ]
     try:
         # Newer transformers / mlx-lm support tools= directly
         return tokenizer.apply_chat_template(
@@ -210,11 +216,13 @@ class MLXBackend(LLMBackend):
             if not tool_calls:
                 break
 
-            # Dispatch each tool call, build result messages, re-enter
+            # Dispatch each tool call, build result messages, re-enter.
+            # NB: content must be a string, never None — some chat templates (Qwen2.5)
+            # concatenate message content directly and crash on None.
             logger.info("MLX tool calls: %s", [tc["name"] for tc in tool_calls])
             working_messages.append({
                 "role": "assistant",
-                "content": _strip_tool_tags(accumulated) or None,
+                "content": _strip_tool_tags(accumulated),
             })
             for i, tc in enumerate(tool_calls):
                 call_id = f"mlx_tool_{_round}_{i}"
